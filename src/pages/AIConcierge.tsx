@@ -9,6 +9,14 @@ type Message = {
   text: string;
   mode?: string;
   sources?: { id: string; title: string }[];
+  nugen?: {
+    used?: boolean;
+    model?: string;
+    intent?: string;
+    confidence?: number;
+    priority?: string;
+    category?: string;
+  };
   timestamp: Date;
   error?: boolean;
 };
@@ -48,7 +56,20 @@ function AIConcierge() {
     setLoading(true);
 
     try {
-      const result = await api<{ answer: string; sources: { id: string; title: string }[]; mode: string; model: string | null }>(
+      const result = await api<{
+        answer: string;
+        sources: { id: string; title: string }[];
+        mode: string;
+        model: string | null;
+        nugen?: {
+          used?: boolean;
+          model?: string;
+          intent?: string;
+          confidence?: number;
+          priority?: string;
+          category?: string;
+        };
+      }>(
         '/concierge/chat', 'POST', { message: question }
       );
       setMessages(prev => [...prev, {
@@ -57,8 +78,10 @@ function AIConcierge() {
         text: result.answer,
         mode: result.mode,
         sources: result.sources,
+        nugen: result.nugen,
         timestamp: new Date(),
       }]);
+
     } catch (e: any) {
       setMessages(prev => [...prev, {
         id: crypto.randomUUID(),
@@ -130,7 +153,14 @@ function AIConcierge() {
                         {msg.mode === 'rag-llm' ? 'AI' : 'KB'}
                       </span>
                     )}
+                    {msg.nugen?.used && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200/60 inline-flex items-center gap-1">
+                        <Sparkles className="w-2.5 h-2.5 text-emerald-600" />
+                        AI Intelligence: Nugen Hospitality Model{msg.nugen.confidence ? ` (${Math.round(msg.nugen.confidence)}%)` : ''}
+                      </span>
+                    )}
                   </div>
+
                 </div>
               </div>
             </div>

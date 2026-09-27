@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { LayoutDashboard, Bot, Utensils, Sparkles, ClipboardList, MessageSquare, TrendingUp, Users, Wrench, Package, Heart, LogOut, Menu, X, ChevronRight, MapPin, BedDouble, Sun, Moon, Calculator } from 'lucide-react';
+import { LayoutDashboard, Bot, Utensils, Sparkles, ClipboardList, MessageSquare, TrendingUp, Users, Wrench, Package, Heart, LogOut, Menu, X, ChevronRight, MapPin, BedDouble, Calculator, CloudRain } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Brand from './components/Brand';
 import Login from './pages/Login';
+import LandingPage from './pages/LandingPage';
 import GuestPortal from './pages/GuestPortal';
 import ManagerPortal from './pages/ManagerPortal';
 import RoomsManagement from './pages/RoomsManagement';
@@ -11,7 +12,13 @@ import PredictiveMaintenance from './pages/PredictiveMaintenance';
 import InventoryOptimization from './pages/InventoryOptimization';
 import GuestExperience from './pages/GuestExperience';
 import RevenueDashboard from './pages/RevenueDashboard';
+import ServicesManagement from './pages/ServicesManagement';
+import WeatherDigitalTwin from './pages/WeatherDigitalTwin';
 import { api, type User } from './services/api';
+
+// Landing Page Configuration switch:
+// Set to false if you ever wish to completely disable the landing page and revert to direct login
+const ENABLE_LANDING_PAGE = true;
 
 const guestNav = [
   { id: 'stay', label: 'My stay', icon: LayoutDashboard },
@@ -23,10 +30,12 @@ const guestNav = [
 ];
 const managerNav = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'digital-twin', label: 'Weather Digital Twin', icon: CloudRain },
   { id: 'rooms', label: 'Rooms & Guests', icon: BedDouble },
   { id: 'requests', label: 'Service requests', icon: ClipboardList },
   { id: 'pricing', label: 'Dynamic pricing', icon: TrendingUp },
   { id: 'sentiment', label: 'Guest sentiment', icon: MessageSquare },
+  { id: 'services', label: 'Resort services', icon: Sparkles },
   { id: 'revenue', label: 'Business & Revenue', icon: Calculator },
   { id: 'staff', label: 'Staff scheduling', icon: Users },
   { id: 'maintenance', label: 'Maintenance', icon: Wrench },
@@ -47,19 +56,26 @@ export default function App() {
   const [page, setPage] = useState('');
   const [mobile, setMobile] = useState(false);
   const [logoutError, setLogoutError] = useState('');
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('sr360_theme');
-    return saved === 'dark' ? 'dark' : 'light';
+
+  // Landing page vs Direct Login mode
+  const [viewMode, setViewMode] = useState<'landing' | 'login'>(() => {
+    if (!ENABLE_LANDING_PAGE) return 'login';
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.toLowerCase();
+      if (hash === '#login') return 'login';
+      const saved = localStorage.getItem('sr360_direct_login');
+      if (saved === 'true') return 'login';
+    }
+    return 'landing';
   });
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('sr360_theme', theme);
-  }, [theme]);
+  const [loginInitialRole, setLoginInitialRole] = useState<'guest' | 'manager'>('guest');
 
-  const toggleTheme = () => {
-    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
-  };
+  useEffect(() => {
+    // Ensure clean default day/light mode only
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.removeItem('sr360_theme');
+  }, []);
 
   const navigate = (value: string) => {
     window.location.hash = value;
@@ -91,6 +107,32 @@ export default function App() {
     return () => window.removeEventListener('hashchange', read);
   }, [user]);
 
+  const quickDemoLogin = async (role: 'guest' | 'manager') => {
+    try {
+      const credentials = role === 'guest'
+        ? { email: 'guest@smartresort.demo', password: 'Guest@360!', role: 'guest' }
+        : { email: 'manager@smartresort.demo', password: 'Manager@360!', role: 'manager' };
+      const loggedUser = await api<User>('/auth/login', 'POST', credentials);
+      setUser(loggedUser);
+      navigate(loggedUser.role === 'guest' ? 'stay' : 'overview');
+    } catch {
+      setLoginInitialRole(role);
+      setViewMode('login');
+    }
+  };
+
+  const toggleDirectLoginPreference = () => {
+    const current = localStorage.getItem('sr360_direct_login') === 'true';
+    const next = !current;
+    if (next) {
+      localStorage.setItem('sr360_direct_login', 'true');
+      setViewMode('login');
+    } else {
+      localStorage.removeItem('sr360_direct_login');
+      setViewMode('landing');
+    }
+  };
+
   const logout = async () => {
     try {
       await api('/auth/logout', 'POST');
@@ -101,6 +143,8 @@ export default function App() {
       setPage('');
       window.location.hash = '';
       setLogoutError('');
+      const direct = localStorage.getItem('sr360_direct_login') === 'true';
+      setViewMode(direct ? 'login' : 'landing');
     }
   };
 
@@ -129,11 +173,41 @@ export default function App() {
     </div>
   );
 
-  if (!user) return <Login onLogin={value => { setUser(value); navigate(value.role === 'guest' ? 'stay' : 'overview'); }} />;
+  if (!user) {
+    if (viewMode === 'landing') {
+      return (
+        <LandingPage
+          onEnterPortal={(targetRole) => {
+            if (targetRole) setLoginInitialRole(targetRole);
+            setViewMode('login');
+          }}
+          onDirectGuestLogin={(loggedUser) => {
+            setUser(loggedUser);
+            navigate('stay');
+          }}
+          onToggleDirectLoginPreference={toggleDirectLoginPreference}
+          directLoginMode={localStorage.getItem('sr360_direct_login') === 'true'}
+        />
+      );
+    }
+
+    return (
+      <Login
+        initialRole={loginInitialRole}
+        onBackToLanding={() => setViewMode('landing')}
+        onLogin={value => {
+          setUser(value);
+          navigate(value.role === 'guest' ? 'stay' : 'overview');
+        }}
+      />
+    );
+  }
 
   const nav = user.role === 'guest' ? guestNav : managerNav;
   const legacyPages: Record<string, JSX.Element> = {
+    'digital-twin': <WeatherDigitalTwin navigate={navigate} />,
     rooms: <RoomsManagement navigate={navigate} />,
+    services: <ServicesManagement navigate={navigate} />,
     revenue: <RevenueDashboard navigate={navigate} />,
     staff: <StaffScheduling />,
     maintenance: <PredictiveMaintenance />,
@@ -245,17 +319,6 @@ export default function App() {
             <span className="header-date">
               {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
             </span>
-            <motion.button
-              className="topbar-theme-btn"
-              title={theme === 'dark' ? 'Switch to Day mode' : 'Switch to Night mode'}
-              aria-label={theme === 'dark' ? 'Switch to Day mode' : 'Switch to Night mode'}
-              onClick={toggleTheme}
-              whileHover={{ scale: 1.04 }}
-              whileTap={{ scale: 0.96 }}
-            >
-              {theme === 'dark' ? <Sun size={14} className="theme-icon-sun" /> : <Moon size={14} className="theme-icon-moon" />}
-              <span>{theme === 'dark' ? 'Day mode' : 'Night mode'}</span>
-            </motion.button>
             <motion.button
               className="topbar-logout-btn"
               title="Sign out"

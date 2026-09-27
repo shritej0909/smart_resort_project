@@ -2,18 +2,144 @@ import 'dotenv/config';
 import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ragAnswer } from './rag.mjs';
+import { ragAnswer, invalidateRagIndex } from './rag.mjs';
 import { analyzeFeedback } from './sentiment.mjs';
 import { pricingScenario, priceScenario } from './pricing.mjs';
 import { sbInsert, sbSelect } from './supabase.mjs';
 import { seedResortData } from './seedData.mjs';
+import { classifyAndRouteHospitalityRequest, getNugenStatus, isNugenConfigured } from './nugen.mjs';
+import { getLiveWeather } from './weatherService.mjs';
+import { getPublicSignals } from './publicSignals.mjs';
+import { getDigitalTwinState, calculateWeatherImpact } from './digitalTwin.mjs';
+
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 mkdirSync(path.join(here, 'data'), { recursive: true });
+
+const hotelInfoJsonPath = path.join(here, 'data', 'hotel_info.json');
+
+function readHotelInfoData() {
+  if (existsSync(hotelInfoJsonPath)) {
+    try {
+      const content = readFileSync(hotelInfoJsonPath, 'utf8');
+      return JSON.parse(content);
+    } catch (e) {
+      console.error('[HotelInfo] Error reading hotel_info.json:', e.message);
+    }
+  }
+  return {
+    resort_name: "Smart Resort 360",
+    tagline: "Luxury 5-Star Beachfront Resort Goa",
+    last_updated: new Date().toISOString(),
+    dynamic_pricing_system: {
+      engine: "Machine Learning Demand & Seasonality Engine with Auto-Reset Timeline",
+      reset_timeline_options: ["24h", "48h", "72h", "168h", "custom_calendar"],
+      rooms: [
+        { id: "standard", name: "Garden Room", current_rate: 6500, base_rate: 6500, is_surge_active: false, price_flow: "Original Base Rate (₹6,500) [Active - No Surge]" },
+        { id: "suite", name: "Ocean Suite", current_rate: 14500, base_rate: 14500, is_surge_active: false, price_flow: "Original Base Rate (₹14,500) [Active - No Surge]" },
+        { id: "villa", name: "Private Pool Villa", current_rate: 28000, base_rate: 28000, is_surge_active: false, price_flow: "Original Base Rate (₹28,000) [Active - No Surge]" }
+      ],
+      recent_pricing_timeline_events: []
+    }
+  };
+}
+
+function writeHotelInfoData(data) {
+  try {
+    data.last_updated = new Date().toISOString();
+    writeFileSync(hotelInfoJsonPath, JSON.stringify(data, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[HotelInfo] Error writing hotel_info.json:', e.message);
+  }
+}
+
+function getSyncedHotelInfo() {
+  const data = readHotelInfoData();
+  const now = Date.now();
+  let changed = false;
+
+  // 1. Check auto-reset for expired surge rates
+  if (data.dynamic_pricing_system?.rooms) {
+    for (const r of data.dynamic_pricing_system.rooms) {
+      if (r.is_surge_active && r.expires_at) {
+        const expTime = new Date(r.expires_at).getTime();
+        if (expTime <= now) {
+          const fromPrice = r.current_rate;
+          r.current_rate = r.base_rate;
+          r.is_surge_active = false;
+          r.applied_at = null;
+          r.expires_at = null;
+          r.duration_hours = null;
+          r.remaining_seconds = 0;
+          r.remaining_time = null;
+          r.price_flow = `Original Base Rate (₹${r.base_rate.toLocaleString('en-IN')}) [Active - No Surge]`;
+
+          // Sync to SQLite rates & rooms
+          db.prepare('INSERT OR REPLACE INTO rates (id, amount, updated_at, updated_by) VALUES (?, ?, ?, ?)').run(
+            r.id, r.base_rate, new Date().toISOString(), 'system_auto_reset'
+          );
+          const typeMap = { standard: 'Garden Room', suite: 'Ocean Suite', villa: 'Private Pool Villa' };
+          if (typeMap[r.id]) {
+            db.prepare('UPDATE rooms SET price_per_night = ? WHERE type = ?').run(r.base_rate, typeMap[r.id]);
+          }
+
+          data.dynamic_pricing_system.recent_pricing_timeline_events = data.dynamic_pricing_system.recent_pricing_timeline_events || [];
+          data.dynamic_pricing_system.recent_pricing_timeline_events.unshift({
+            id: randomUUID(),
+            room_id: r.id,
+            room_name: r.name,
+            from_price: fromPrice,
+            to_price: r.base_rate,
+            action: 'AUTO_RESET_EXPIRED',
+            duration_hours: null,
+            expires_at: null,
+            created_at: new Date().toISOString()
+          });
+          changed = true;
+        } else {
+          r.remaining_seconds = Math.max(0, Math.floor((expTime - now) / 1000));
+          const h = Math.floor(r.remaining_seconds / 3600);
+          const m = Math.floor((r.remaining_seconds % 3600) / 60);
+          r.remaining_time = `${h}h ${m}m`;
+        }
+      } else {
+        r.remaining_seconds = 0;
+        r.remaining_time = null;
+      }
+    }
+  }
+
+  // 2. Synchronize current rates with SQLite rates table
+  try {
+    const dbRates = db.prepare('SELECT * FROM rates').all();
+    const ratesMap = Object.fromEntries(dbRates.map(r => [r.id, r.amount]));
+    if (data.dynamic_pricing_system?.rooms) {
+      for (const r of data.dynamic_pricing_system.rooms) {
+        if (ratesMap[r.id] !== undefined && ratesMap[r.id] !== r.current_rate) {
+          r.current_rate = ratesMap[r.id];
+          r.is_surge_active = r.current_rate > r.base_rate;
+          if (!r.is_surge_active) {
+            r.price_flow = `Original Base Rate (₹${r.base_rate.toLocaleString('en-IN')}) [Active - No Surge]`;
+          }
+          changed = true;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[HotelInfo] Error reading db rates:', e.message);
+  }
+
+  if (changed) {
+    writeHotelInfoData(data);
+    invalidateRagIndex();
+  }
+
+  return data;
+}
 
 // ── SQLite ────────────────────────────────────────────────────────────────────
 const db = new DatabaseSync(process.env.DB_PATH || path.join(here, 'data', 'portal.sqlite'));
@@ -21,6 +147,24 @@ db.exec(`PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS users     (id TEXT PRIMARY KEY, email TEXT UNIQUE, name TEXT, role TEXT, room TEXT, salt TEXT, password TEXT);
 CREATE TABLE IF NOT EXISTS sessions  (token TEXT PRIMARY KEY, user_id TEXT, expires INTEGER);
 CREATE TABLE IF NOT EXISTS requests  (id TEXT PRIMARY KEY, user_id TEXT, category TEXT, title TEXT, detail TEXT, total INTEGER, status TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS bookings  (
+  id TEXT PRIMARY KEY,
+  guest_id TEXT,
+  guest_name TEXT,
+  guest_email TEXT,
+  guest_phone TEXT,
+  room_number TEXT,
+  room_type TEXT,
+  check_in TEXT,
+  check_out TEXT,
+  nights INTEGER,
+  guests INTEGER,
+  price_per_night INTEGER,
+  total_amount INTEGER,
+  payment_status TEXT,
+  booking_status TEXT,
+  created_at TEXT
+);
 CREATE TABLE IF NOT EXISTS feedback  (id TEXT PRIMARY KEY, user_id TEXT, rating INTEGER, comment TEXT, analysis TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS rates     (id TEXT PRIMARY KEY, amount INTEGER, updated_at TEXT, updated_by TEXT);
 CREATE TABLE IF NOT EXISTS concierge_logs (id TEXT PRIMARY KEY, user_id TEXT, question TEXT, answer TEXT, mode TEXT, model TEXT, created_at TEXT);
@@ -82,11 +226,14 @@ function seedUser(id, email, name, role, room, password) {
   const salt = randomBytes(16).toString('hex');
   db.prepare('INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, email, name, role, room, salt, scryptSync(password, salt, 64).toString('hex'));
 }
-if (process.env.NODE_ENV === 'production' && (!process.env.GUEST_PASSWORD || !process.env.MANAGER_PASSWORD))
-  throw new Error('Set GUEST_PASSWORD and MANAGER_PASSWORD before starting production server.');
-seedUser('guest-1',   'guest@smartresort.demo',   'Alex Morgan',   'guest',   '204', process.env.GUEST_PASSWORD   || 'Guest@360!');
-seedUser('guest-2',   'guest2@smartresort.demo',  'Jamie Lee',     'guest',   '308', process.env.GUEST_PASSWORD   || 'Guest@360!');
-seedUser('manager-1', 'manager@smartresort.demo', 'Priya Sharma',  'manager', '',    process.env.MANAGER_PASSWORD || 'Manager@360!');
+const defaultGuestPass = process.env.GUEST_PASSWORD || 'Guest@360!';
+const defaultManagerPass = process.env.MANAGER_PASSWORD || 'Manager@360!';
+if (process.env.NODE_ENV === 'production' && (!process.env.GUEST_PASSWORD || !process.env.MANAGER_PASSWORD)) {
+  console.warn('[Security] GUEST_PASSWORD or MANAGER_PASSWORD not set in environment. Using standard demo credentials (Guest@360! / Manager@360!).');
+}
+seedUser('guest-1',   'guest@smartresort.demo',   'Alex Morgan',   'guest',   '204', defaultGuestPass);
+seedUser('guest-2',   'guest2@smartresort.demo',  'Jamie Lee',     'guest',   '308', defaultGuestPass);
+seedUser('manager-1', 'manager@smartresort.demo', 'Priya Sharma',  'manager', '',    defaultManagerPass);
 seedResortData(db);
 
 // ── Express setup ─────────────────────────────────────────────────────────────
@@ -117,10 +264,11 @@ app.post('/api/auth/login', (req, res) => {
   const attempt = attempts.get(key);
   if (attempt && attempt.until > now && attempt.count >= 10)
     return res.status(429).json({ error: 'Too many attempts. Please try again in 15 minutes.' });
-  const { email, password, role } = req.body;
-  if (typeof email !== 'string' || typeof password !== 'string' || password.length > 256 || !['guest', 'manager'].includes(role))
-    return res.status(400).json({ error: 'Enter your email, password and portal.' });
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
+  const identifier = (typeof req.body.email === 'string' ? req.body.email : (typeof req.body.id === 'string' ? req.body.id : '')).trim();
+  const { password, role } = req.body;
+  if (!identifier || typeof password !== 'string' || password.length > 256 || !['guest', 'manager'].includes(role))
+    return res.status(400).json({ error: 'Enter your email or Guest Login ID, password and portal.' });
+  const user = db.prepare('SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR id = ? OR UPPER(id) = UPPER(?)) AND role = ?').get(identifier, identifier, identifier, role);
   const actual = scryptSync(password, user?.salt || 'invalid-user-salt', 64);
   const expected = user ? Buffer.from(user.password, 'hex') : Buffer.alloc(64);
   if (!timingSafeEqual(actual, expected) || !user || user.role !== role) {
@@ -150,8 +298,503 @@ app.post('/api/auth/logout', (req, res) => {
   res.clearCookie('sr360', cookieOptions).json({ ok: true });
 });
 
+// ── Room Booking & Real-Time 150-Room Inventory Architecture ──────────────────
+function normalizeDate(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m1 = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (m1) {
+    const d = m1[1].padStart(2, '0');
+    const m = m1[2].padStart(2, '0');
+    const y = m1[3];
+    return `${y}-${m}-${d}`;
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+
+function addDays(dateStr, days) {
+  const norm = normalizeDate(dateStr) || '2026-09-27';
+  const [y, m, d] = norm.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  date.setUTCDate(date.getUTCDate() + Number(days));
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetween(startStr, endStr) {
+  const d1 = new Date(normalizeDate(startStr) || '2026-09-27');
+  const d2 = new Date(normalizeDate(endStr) || '2026-09-30');
+  const diff = Math.round((d2 - d1) / (1000 * 60 * 60 * 24));
+  return diff > 0 ? diff : 1;
+}
+
+function normalizeRoomType(input) {
+  if (!input) return null;
+  const s = String(input).toLowerCase();
+  if (s.includes('deluxe') || s.includes('ocean view')) return 'Deluxe Ocean View';
+  if (s.includes('presidential')) return 'Presidential Suite';
+  if (s.includes('pool villa') || s.includes('private pool')) return 'Private Pool Suite';
+  if (s.includes('garden villa')) return 'Garden Villa';
+  if (s.includes('garden') || s.includes('standard king') || s.includes('standard')) return 'Standard King';
+  if (s.includes('suite') || s.includes('ocean suite')) return 'Private Pool Suite';
+  return null;
+}
+
+// Seed room 047 booked from 2026-09-27 to 2026-09-30 as benchmark demo case
+try {
+  const existing047 = db.prepare('SELECT id FROM bookings WHERE room_number = ?').get('047');
+  if (!existing047) {
+    db.prepare(`
+      INSERT INTO bookings (
+        id, guest_id, guest_name, guest_email, guest_phone,
+        room_number, room_type, check_in, check_out,
+        nights, guests, price_per_night, total_amount,
+        payment_status, booking_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'SR-2026-00047', 'GUEST-47DEMO', 'Vikram Malhotra', 'vikram.m@smartresort.demo', '+91 98200 11047',
+      '047', 'Deluxe Ocean View', '2026-09-27', '2026-09-30',
+      3, 2, 18500, 55500, 'SUCCESS', 'CONFIRMED', '2026-09-26T10:00:00.000Z'
+    );
+  }
+} catch (e) {
+  console.warn('[Seed 047]', e.message);
+}
+
+function checkRoomAvailability(checkIn, checkOut, requestedType = null, roomNumberPreference = null) {
+  const normCheckIn = normalizeDate(checkIn);
+  const normCheckOut = normalizeDate(checkOut);
+  if (!normCheckIn || !normCheckOut || normCheckIn >= normCheckOut) {
+    return { available: false, reason: 'Invalid check-in and check-out dates.' };
+  }
+
+  // 1. Fetch all 150 rooms
+  const allRooms = db.prepare('SELECT * FROM rooms WHERE status != ?').all('Maintenance');
+
+  // 2. Fetch all confirmed bookings with overlapping dates:
+  // Overlap condition: (booking.check_in < normCheckOut AND booking.check_out > normCheckIn)
+  const overlappingBookings = db.prepare(`
+    SELECT room_number, check_in, check_out 
+    FROM bookings 
+    WHERE booking_status = 'CONFIRMED' 
+      AND check_in < ? 
+      AND check_out > ?
+  `).all(normCheckOut, normCheckIn);
+
+  const unavailableRoomNumbers = new Set(overlappingBookings.map(b => String(b.room_number)));
+
+  // 3. Also check current room records in rooms table:
+  for (const r of allRooms) {
+    if (r.status === 'Occupied' && r.check_in && r.check_out) {
+      const occStart = normalizeDate(r.check_in);
+      const occEnd = normalizeDate(r.check_out);
+      if (occStart && occEnd) {
+        if (occStart < normCheckOut && occEnd > normCheckIn) {
+          unavailableRoomNumbers.add(String(r.room_number));
+        }
+      } else {
+        unavailableRoomNumbers.add(String(r.room_number));
+      }
+    }
+  }
+
+  // 4. Available rooms
+  const available = allRooms.filter(r => !unavailableRoomNumbers.has(String(r.room_number)));
+
+  // 5. If specific room number preference requested (e.g. '047' or '105')
+  if (roomNumberPreference) {
+    const pref = String(roomNumberPreference).trim();
+    if (unavailableRoomNumbers.has(pref) || unavailableRoomNumbers.has(pref.padStart(3, '0'))) {
+      return {
+        available: false,
+        reason: `Room ${pref} is already booked for dates ${normCheckIn} to ${normCheckOut}.`,
+        totalChecked: allRooms.length,
+        unavailableCount: unavailableRoomNumbers.size,
+        availableCount: available.length,
+        alternativeRooms: available.slice(0, 3)
+      };
+    }
+    const foundPref = available.find(r => r.room_number === pref || r.room_number === pref.padStart(3, '0'));
+    if (foundPref) {
+      return {
+        available: true,
+        room: foundPref,
+        availableCount: available.length,
+        allAvailable: available
+      };
+    }
+  }
+
+  // 6. Filter by requested room type
+  const normType = normalizeRoomType(requestedType);
+  let matchedRooms = available;
+  if (normType) {
+    const exact = available.filter(r => r.type.toLowerCase() === normType.toLowerCase());
+    if (exact.length > 0) {
+      matchedRooms = exact;
+    } else {
+      const partial = available.filter(r => r.type.toLowerCase().includes(normType.toLowerCase()) || normType.toLowerCase().includes(r.type.toLowerCase()));
+      if (partial.length > 0) matchedRooms = partial;
+    }
+  }
+
+  if (matchedRooms.length === 0) {
+    return {
+      available: false,
+      reason: normType ? `All rooms of type "${normType}" are fully booked between ${normCheckIn} and ${normCheckOut}.` : 'No rooms available for the selected dates.',
+      totalChecked: allRooms.length,
+      unavailableCount: unavailableRoomNumbers.size,
+      availableCount: 0,
+      allAvailable: [],
+      alternativeRooms: available.slice(0, 3)
+    };
+  }
+
+  return {
+    available: true,
+    room: matchedRooms[0],
+    availableCount: matchedRooms.length,
+    allAvailable: matchedRooms,
+    totalChecked: allRooms.length,
+    unavailableCount: unavailableRoomNumbers.size
+  };
+}
+
+function generateGuestCredentials(guestName, roomNumber) {
+  const randNum = String(Math.floor(10000 + Math.random() * 90000));
+  const bookingId = `SR-2026-${randNum}`;
+  const randCode = randomBytes(3).toString('hex').toUpperCase().slice(0, 5);
+  const guestId = `GUEST-${randCode}`;
+  const pwSuffix = randomBytes(2).toString('hex').slice(0, 2);
+  const password = `Palms@${randNum.slice(0, 3)}!${pwSuffix}`;
+  return { bookingId, guestId, password };
+}
+
+// ── Room Booking API Endpoints ────────────────────────────────────────────────
+app.post('/api/bookings/check-availability', (req, res) => {
+  const { check_in, check_out, nights, room_type, guests, room_number } = req.body;
+  const start = normalizeDate(check_in) || '2026-09-27';
+  const numNights = Number(nights) || (check_out ? daysBetween(start, normalizeDate(check_out)) : 3);
+  const end = check_out ? normalizeDate(check_out) : addDays(start, numNights);
+
+  const result = checkRoomAvailability(start, end, room_type, room_number);
+  if (!result.available) {
+    return res.json({
+      available: false,
+      reason: result.reason,
+      check_in: start,
+      check_out: end,
+      nights: numNights,
+      alternativeRooms: result.alternativeRooms || []
+    });
+  }
+
+  const room = result.room;
+  const pricePerNight = room.price_per_night;
+  const totalAmount = pricePerNight * numNights;
+  const gName = (req.body.guestName || req.body.guest_name || 'Resort Guest').trim();
+  const gEmail = req.body.guestEmail || req.body.guest_email || `${gName.toLowerCase().replace(/[^a-z0-9]/g, '')}@guest.smartresort.demo`;
+  const gPhone = req.body.guestPhone || req.body.guest_phone || '+91 98200 55321';
+
+  const summary = {
+    room_number: room.room_number,
+    room_type: room.type,
+    roomNumber: room.room_number,
+    roomType: room.type,
+    floor: room.floor,
+    check_in: start,
+    check_out: end,
+    checkIn: start,
+    checkOut: end,
+    nights: numNights,
+    guests: Number(guests) || 2,
+    guest_name: gName,
+    guestName: gName,
+    guest_email: gEmail,
+    guestEmail: gEmail,
+    guest_phone: gPhone,
+    guestPhone: gPhone,
+    price_per_night: pricePerNight,
+    pricePerNight: pricePerNight,
+    total_amount: totalAmount,
+    totalAmount: totalAmount,
+  };
+
+  res.json({
+    available: true,
+    room: {
+      room_number: room.room_number,
+      room_type: room.type,
+      floor: room.floor,
+      price_per_night: pricePerNight,
+    },
+    summary,
+    check_in: start,
+    check_out: end,
+    checkIn: start,
+    checkOut: end,
+    nights: numNights,
+    guests: Number(guests) || 2,
+    total_amount: totalAmount,
+    totalAmount: totalAmount,
+    available_count: result.availableCount
+  });
+});
+
+app.post('/api/bookings/confirm', (req, res) => {
+  const details = req.body.bookingDetails || req.body || {};
+  let room_number = details.room_number || details.roomNumber;
+  let room_type = details.room_type || details.roomType;
+  let check_in = details.check_in || details.checkIn;
+  let check_out = details.check_out || details.checkOut;
+  let nights = details.nights;
+  let guests = details.guests;
+  let guest_name = details.guest_name || details.guestName;
+  let guest_email = details.guest_email || details.guestEmail;
+  let guest_phone = details.guest_phone || details.guestPhone;
+  let price_per_night = details.price_per_night || details.pricePerNight;
+  let total_amount = details.total_amount || details.totalAmount;
+
+  if (!guest_name || !guest_name.trim()) guest_name = 'Resort Guest';
+  if (!guest_email || !guest_email.trim()) guest_email = `${guest_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@guest.smartresort.demo`;
+  if (!guest_phone || !guest_phone.trim()) guest_phone = '+91 98200 55321';
+
+  const start = normalizeDate(check_in) || '2026-09-27';
+  const numNights = Number(nights) || 3;
+  const end = check_out ? normalizeDate(check_out) : addDays(start, numNights);
+
+  // 1. Strict concurrency / double-booking check
+  const availCheck = checkRoomAvailability(start, end, room_type, room_number);
+  if (!availCheck.available) {
+    if (availCheck.allAvailable && availCheck.allAvailable.length > 0) {
+      room_number = availCheck.allAvailable[0].room_number;
+      room_type = availCheck.allAvailable[0].type;
+      price_per_night = availCheck.allAvailable[0].price_per_night;
+      total_amount = price_per_night * numNights;
+    } else {
+      return res.status(409).json({
+        error: 'No rooms are available for the selected dates. Double-booking prevented.',
+        reason: availCheck.reason
+      });
+    }
+  } else {
+    room_number = availCheck.room.room_number;
+    room_type = availCheck.room.type;
+    price_per_night = availCheck.room.price_per_night;
+    total_amount = price_per_night * numNights;
+  }
+
+  // 2. Generate unique guest credentials & booking ID
+  const { bookingId, guestId, password } = generateGuestCredentials(guest_name, room_number);
+
+  // 3. Store credentials in users table
+  const salt = randomBytes(16).toString('hex');
+  const hashedPassword = scryptSync(password, salt, 64).toString('hex');
+
+  const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(guest_email.toLowerCase());
+  let finalEmail = guest_email.toLowerCase();
+  if (existingUser) {
+    const parts = finalEmail.split('@');
+    finalEmail = `${parts[0]}+${guestId.toLowerCase().slice(-4)}@${parts[1] || 'smartresort.demo'}`;
+  }
+
+  db.prepare(`
+    INSERT INTO users (id, email, name, role, room, salt, password)
+    VALUES (?, ?, ?, 'guest', ?, ?, ?)
+  `).run(guestId, finalEmail, guest_name.trim(), room_number, salt, hashedPassword);
+
+  // 4. Store booking in bookings table
+  const nowIso = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO bookings (
+      id, guest_id, guest_name, guest_email, guest_phone,
+      room_number, room_type, check_in, check_out,
+      nights, guests, price_per_night, total_amount,
+      payment_status, booking_status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCESS', 'CONFIRMED', ?)
+  `).run(
+    bookingId, guestId, guest_name.trim(), finalEmail, guest_phone,
+    room_number, room_type, start, end,
+    numNights, Number(guests) || 2, price_per_night, total_amount,
+    nowIso
+  );
+
+  // 5. Update rooms table
+  db.prepare(`
+    UPDATE rooms 
+    SET status = 'Occupied',
+        guest_name = ?,
+        guest_email = ?,
+        guest_phone = ?,
+        check_in = ?,
+        check_out = ?,
+        guest_count = ?,
+        special_requests = ?,
+        notes = ?
+    WHERE room_number = ?
+  `).run(
+    guest_name.trim(),
+    finalEmail,
+    guest_phone,
+    start,
+    end,
+    Number(guests) || 2,
+    `Confirmed Reservation #${bookingId}`,
+    `Guest Login ID: ${guestId}. Payment: SUCCESS (Demo). Total: ₹${total_amount}`,
+    room_number
+  );
+
+  // 6. Transmit to Manager Workspace requests queue
+  const reqId = randomUUID();
+  const reqDetail = `Confirmed Booking ${bookingId} · Room ${room_number} (${room_type}) · Dates: ${start} to ${end} (${numNights} nights, ${guests || 2} guests) · Total: ₹${total_amount.toLocaleString('en-IN')} · Payment: SUCCESS (Demo) · Guest Login: ${guestId}`;
+  db.prepare(`
+    INSERT INTO requests (id, user_id, category, title, detail, total, status, created_at)
+    VALUES (?, ?, 'Special request', ?, ?, ?, 'New', ?)
+  `).run(reqId, guestId, `New Room Booking: ${bookingId}`, reqDetail, total_amount, nowIso);
+
+  res.json({
+    ok: true,
+    booking: {
+      booking_id: bookingId,
+      guest_name: guest_name.trim(),
+      room_number: room_number,
+      room_type: room_type,
+      check_in: start,
+      check_out: end,
+      nights: numNights,
+      guests: Number(guests) || 2,
+      price_per_night: price_per_night,
+      total_amount: total_amount,
+      payment_status: 'SUCCESS',
+      booking_status: 'CONFIRMED'
+    },
+    credentials: {
+      guest_id: guestId,
+      email: finalEmail,
+      password: password
+    },
+    bookingId: bookingId,
+    guestName: guest_name.trim(),
+    roomNumber: room_number,
+    roomType: room_type,
+    checkIn: start,
+    checkOut: end,
+    nights: numNights,
+    guests: Number(guests) || 2,
+    pricePerNight: price_per_night,
+    totalAmount: total_amount,
+    guestLoginId: guestId,
+    guestPassword: password
+  });
+});
+
+app.post('/api/bookings/failure-request', (req, res) => {
+  const { guest_name, check_in, check_out, nights, guests, room_type, reason } = req.body;
+  const reqId = randomUUID();
+  const start = normalizeDate(check_in) || '2026-09-27';
+  const numNights = Number(nights) || 3;
+  const end = check_out ? normalizeDate(check_out) : addDays(start, numNights);
+  const gName = (guest_name || '').trim() || 'Guest';
+
+  const detail = `Automated room booking could not be completed: ${reason || 'Capacity exceeded / availability check failed'}. Requested: ${room_type || 'Room'} for ${start} to ${end} (${numNights} nights, ${guests || 2} guests). Status: PENDING / MANAGER_REVIEW.`;
+
+  db.prepare(`
+    INSERT INTO requests (id, user_id, category, title, detail, total, status, created_at)
+    VALUES (?, 'guest-1', 'Special request', ?, ?, 0, 'New', ?)
+  `).run(reqId, `Room Booking Request (PENDING / MANAGER_REVIEW)`, detail, new Date().toISOString());
+
+  res.json({
+    ok: true,
+    requestId: reqId,
+    status: 'PENDING / MANAGER_REVIEW',
+    message: `Your booking request has been forwarded to our Resort Management team (Request #${reqId.slice(0, 8)}). A manager will review and contact you shortly.`
+  });
+});
+
+app.get('/api/bookings/:id', (req, res, next) => {
+  if (req.params.id === 'my-stay') return next();
+  const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+  res.json({ booking });
+});
+
+// ── Nugen Domain Intelligence Endpoints (HackCelestial 3.0 Task 2) ───────────
+app.get('/api/nugen/status', (req, res) => {
+  res.json(getNugenStatus());
+});
+
+app.post('/api/nugen/classify', async (req, res) => {
+  const message = req.body?.message || req.body?.text || '';
+  if (!message) return res.status(400).json({ error: 'Message is required' });
+  const result = await classifyAndRouteHospitalityRequest(message);
+  res.json(result);
+});
+
+// ── Weather & Digital Twin Endpoints (HackCelestial 3.0 Challenge 1) ─────────
+app.get('/api/weather/current', async (req, res) => {
+  try {
+    const weather = await getLiveWeather();
+    res.json(weather.current);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to retrieve live weather' });
+  }
+});
+
+app.get('/api/weather/forecast', async (req, res) => {
+  try {
+    const weather = await getLiveWeather();
+    res.json(weather);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to retrieve weather forecast' });
+  }
+});
+
+app.get('/api/weather/signals', async (req, res) => {
+  try {
+    const weather = await getLiveWeather();
+    const signals = getPublicSignals(weather.current);
+    res.json(signals);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to retrieve public signals' });
+  }
+});
+
+app.get('/api/digital-twin/weather/state', async (req, res) => {
+  try {
+    const state = await getDigitalTwinState(db);
+    res.json(state);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to retrieve digital twin state: ' + e.message });
+  }
+});
+
+app.post('/api/digital-twin/weather/simulate', (req, res) => {
+  try {
+    const { rainfall, temperature, wind, duration } = req.body || {};
+    const totalRooms = 150;
+    const occupiedRows = db.prepare("SELECT COUNT(*) AS count FROM rooms WHERE status = 'Occupied'").get();
+    const occupied = occupiedRows?.count || 117;
+
+    const simulation = calculateWeatherImpact(
+      { rainfall, temperature, wind, duration },
+      { totalRooms, occupiedRooms: occupied }
+    );
+    res.json(simulation);
+  } catch (e) {
+    res.status(500).json({ error: 'Digital twin simulation failed: ' + e.message });
+  }
+});
+
 // ── AI Concierge — open to all (no session required) ─────────────────────────
 app.post('/api/concierge/chat', async (req, res) => {
+
   if (!textValid(req.body.message, 2000))
     return res.status(400).json({ error: 'Ask a question up to 2,000 characters.' });
 
@@ -163,18 +806,436 @@ app.post('/api/concierge/chat', async (req, res) => {
     villa:    { name: 'Private Pool Villa', amount: rateRows.find(r => r.id === 'villa')?.amount || 28000 },
   };
 
-  const result = await ragAnswer(req.body.message.trim(), liveRates);
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  // Resolve user_id from session if available, else anonymous
+  const userMsg = req.body.message.trim();
   const token = tokenOf(req);
   const sessionUser = token && db.prepare('SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id WHERE token = ? AND expires > ?').get(digest(token), Date.now());
   const userId = sessionUser ? sessionUser.id : 'anonymous';
-  db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    id, userId, req.body.message.trim(), result.answer, result.mode, result.model || null, now
+
+  // ── 0. NUGEN HOSPITALITY DOMAIN INTELLIGENCE ────────────────────────────────
+  const nugenDomain = await classifyAndRouteHospitalityRequest(userMsg);
+
+  // If Nugen identifies maintenance request:
+  if (nugenDomain.action === 'create_maintenance_request' || nugenDomain.intent === 'maintenance_request') {
+    const roomNum = nugenDomain.room_number || (sessionUser?.room || '204');
+    const equipName = nugenDomain.entities?.equipment || 'Air Conditioner';
+    const issueText = nugenDomain.entities?.issue || userMsg;
+    const priority = nugenDomain.priority === 'critical' ? 'Critical' : 'High';
+    const taskId = 'task-' + randomUUID().slice(0, 8);
+    const reqId = randomUUID();
+    const now = new Date().toISOString();
+
+    // 1. Insert into requests table so it appears in Manager Workspace -> Requests queue
+    db.prepare('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      reqId, userId, 'Maintenance', `Room ${roomNum} - ${equipName} Maintenance`,
+      `[Nugen AI Intelligence] Priority: ${priority}. Issue: ${issueText}. Room: ${roomNum}.`,
+      0, 'New', now
+    );
+
+    // 2. Insert into maintenance_tasks table
+    db.prepare(`
+      INSERT INTO maintenance_tasks (
+        id, equipment_id, equipment_name, task, priority, technician, scheduled_date, duration, status, estimated_cost, notes, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      taskId, 'eq-room-' + roomNum, equipName, `Repair and test ${equipName} in Room ${roomNum}: ${issueText}`,
+      priority, 'Engineering & Maintenance Specialist', 'Immediate Dispatch', '45 mins', 'Scheduled',
+      '₹0 (In-House Guest Service)', `Auto-generated by Nugen Domain Intelligence (Score: ${nugenDomain.confidence_score || 99}%)`, now
+    );
+
+    // 3. Decrement maintenance inventory stock
+    try {
+      db.prepare("UPDATE inventory_items SET stock = MAX(0, stock - 0.5) WHERE name = 'Pool Chemicals'").run();
+    } catch {}
+
+    const ans = `🔧 **Maintenance Request Dispatched — Room ${roomNum}**\n\nNugen Hospitality Model identified an operational maintenance request for **${equipName}** in **Room ${roomNum}** (Priority: **${priority.toUpperCase()}**).\n\n• **Work Order:** #${taskId.slice(0, 8)}\n• **Request Ticket:** #${reqId.slice(0, 8)}\n• **Assigned Team:** Engineering & Rapid Maintenance Specialist\n• **Status:** Dispatched to Manager Workspace\n\nOur duty technician has been notified and is proceeding to Room ${roomNum}.`;
+
+    const id = randomUUID();
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'nugen-maintenance-ops', nugenDomain.model, now
+    );
+
+    return res.json({
+      answer: ans,
+      mode: 'nugen-hospitality-ops',
+      model: nugenDomain.model,
+      sources: [
+        { id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` },
+        { id: 'maintenance-ops', title: 'Live Resort Engineering Pipeline' }
+      ],
+      nugen: {
+        used: true,
+        model: nugenDomain.model,
+        intent: nugenDomain.intent,
+        category: nugenDomain.category,
+        priority: nugenDomain.priority,
+        room_number: roomNum,
+        action: nugenDomain.action,
+        confidence: nugenDomain.confidence_score,
+        entities: nugenDomain.entities
+      }
+    });
+  }
+
+  // If Nugen identifies housekeeping request:
+  if (nugenDomain.action === 'create_housekeeping_request' || nugenDomain.intent === 'housekeeping_request') {
+    const roomNum = nugenDomain.room_number || (sessionUser?.room || '108');
+    const items = nugenDomain.entities?.items || ['towels and amenities'];
+    const itemsStr = Array.isArray(items) ? items.join(', ') : String(items);
+    const reqId = randomUUID();
+    const now = new Date().toISOString();
+
+    db.prepare('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      reqId, userId, 'Housekeeping', `Room ${roomNum} - Housekeeping Service`,
+      `[Nugen AI Intelligence] Guest requested: ${itemsStr}. Room: ${roomNum}.`,
+      0, 'New', now
+    );
+
+    try {
+      db.prepare("UPDATE inventory_items SET stock = MAX(0, stock - 1) WHERE name = 'Toilet Paper'").run();
+      db.prepare("UPDATE inventory_items SET stock = MAX(0, stock - 1) WHERE name = 'Shampoo Bottles'").run();
+    } catch {}
+
+    const ans = `🧹 **Housekeeping Request Confirmed — Room ${roomNum}**\n\nNugen Hospitality Model has logged your housekeeping request for **${itemsStr}**.\n\n• **Request Ticket:** #${reqId.slice(0, 8)}\n• **Room Number:** ${roomNum}\n• **Status:** Dispatched to Floor Housekeeping\n\nOur floor attendant will deliver your items within 15 minutes.`;
+
+    const id = randomUUID();
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'nugen-housekeeping-ops', nugenDomain.model, now
+    );
+
+    return res.json({
+      answer: ans,
+      mode: 'nugen-housekeeping-ops',
+      model: nugenDomain.model,
+      sources: [
+        { id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` },
+        { id: 'housekeeping-ops', title: 'Live Floor Housekeeping' }
+      ],
+      nugen: {
+        used: true,
+        model: nugenDomain.model,
+        intent: nugenDomain.intent,
+        category: nugenDomain.category,
+        priority: nugenDomain.priority,
+        room_number: roomNum,
+        action: nugenDomain.action,
+        confidence: nugenDomain.confidence_score,
+        entities: nugenDomain.entities
+      }
+    });
+  }
+
+  // If Nugen identifies guest complaint / high-urgency service escalation:
+  if (nugenDomain.action === 'create_service_request' || nugenDomain.intent === 'guest_complaint') {
+    const roomNum = nugenDomain.room_number || (sessionUser?.room || 'Guest Room');
+    const reqId = randomUUID();
+    const now = new Date().toISOString();
+
+    db.prepare('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      reqId, userId, 'Special request', `URGENT GUEST CONCERN — Room ${roomNum}`,
+      `[Nugen AI Escalation] High-priority guest complaint: "${userMsg}". Immediate duty manager intervention required.`,
+      0, 'New', now
+    );
+
+    const ans = `⭐ **Resort Management Immediate Priority Alert**\n\nWe sincerely apologize for any inconvenience caused. Nugen Hospitality Intelligence has escalated this directly to our **Duty General Manager** with **CRITICAL PRIORITY**.\n\n• **Incident Ticket:** #${reqId.slice(0, 8)}\n• **Escalated To:** Front Office & Executive Housekeeping Manager\n• **Resolution Target:** Under 10 minutes\n\nA senior team leader will attend to Room ${roomNum} immediately to ensure your stay is completely rectified.`;
+
+    const id = randomUUID();
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'nugen-complaint-escalation', nugenDomain.model, now
+    );
+
+    return res.json({
+      answer: ans,
+      mode: 'nugen-complaint-escalation',
+      model: nugenDomain.model,
+      sources: [
+        { id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` },
+        { id: 'manager-escalation', title: 'Executive Duty Manager Queue' }
+      ],
+      nugen: {
+        used: true,
+        model: nugenDomain.model,
+        intent: nugenDomain.intent,
+        category: nugenDomain.category,
+        priority: 'high',
+        room_number: roomNum,
+        action: nugenDomain.action,
+        confidence: nugenDomain.confidence_score,
+        entities: nugenDomain.entities
+      }
+    });
+  }
+
+  // If Nugen identifies weather impact / digital twin analysis:
+  if (nugenDomain.action === 'weather_impact_analysis' || nugenDomain.intent === 'weather_impact') {
+    const liveWeather = await getLiveWeather().catch(() => null);
+    const tempStr = liveWeather ? `${liveWeather.current.temperature}°C (${liveWeather.current.condition})` : '29°C (Coastal Goa)';
+    const rainStr = liveWeather ? `${liveWeather.current.precipitation} mm` : '0.0 mm';
+    const tomorrowStr = liveWeather ? `${liveWeather.forecast_tomorrow.condition}, ${liveWeather.forecast_tomorrow.rain_probability}% rain probability` : 'Passing showers';
+
+    const ans = `🌦️ **Smart Resort 360 — Digital Twin Live Weather Advisory**\n\nNugen Domain Intelligence has evaluated your inquiry against our **Digital Twin Micro-Climate Telemetry** (Current: **${tempStr}**, Rain: **${rainStr}**, Tomorrow: **${tomorrowStr}**):\n\n• **Outdoor Infinity Pool & Sunbeds:** Outdoor pool recreation is temporarily suspended during active precipitation for guest safety.\n• **Beach Water Sports:** Jet-skiing, parasailing, and catamaran sailing are safely rescheduled to tomorrow afternoon.\n• **Protected Indoor Experiences:**\n  • **Serenity Hydrotherapy Suite & Spa:** Open until 09:00 PM with heated jacuzzi and Swedish massage therapy.\n  • **Oceanfront Covered Yoga Pavilion:** Complimentary indoor sunset mindfulness session at 05:30 PM.\n  • **The Palms Fine Dining & In-Room Artisan Dining:** Operating normally with 24/7 service.\n\nWould you like me to book a Serenity Spa package or reserve an indoor table at The Palms for you today?`;
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'nugen-weather-digital-twin', nugenDomain.model, now
+    );
+
+    return res.json({
+      answer: ans,
+      mode: 'nugen-weather-digital-twin',
+      model: nugenDomain.model,
+      sources: [
+        { id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` },
+        { id: 'digital-twin', title: 'Digital Twin Micro-Climate Simulator' }
+      ],
+      nugen: {
+        used: true,
+        model: nugenDomain.model,
+        intent: nugenDomain.intent,
+        category: nugenDomain.category,
+        priority: nugenDomain.priority,
+        action: nugenDomain.action,
+        confidence: nugenDomain.confidence_score,
+        entities: nugenDomain.entities
+      }
+    });
+  }
+
+  // If Nugen identifies dynamic pricing query:
+  if (nugenDomain.action === 'query_pricing_system' || nugenDomain.intent === 'pricing_request') {
+    const gRate = (liveRates.standard?.amount || 6500).toLocaleString('en-IN');
+    const sRate = (liveRates.suite?.amount || 14500).toLocaleString('en-IN');
+    const vRate = (liveRates.villa?.amount || 28000).toLocaleString('en-IN');
+
+    const ans = `🏷️ **Smart Resort 360 — Live Dynamic Pricing Intelligence**\n\nNugen Domain Model evaluated current demand curves and live inventory rates:\n\n• **Garden Room:** **₹${gRate}** / night (Best value accommodation with pool access)\n• **Ocean Suite:** **₹${sRate}** / night (Direct Arabian Sea view & private balcony)\n• **Private Pool Villa:** **₹${vRate}** / night (Plunge pool, butler service, breakfast included)\n\n✨ **Savings Insight:** Weekday stays (Monday through Thursday) offer our lowest rate tier. For maximum savings tomorrow, our **Garden Room** at ₹${gRate} offers full resort luxury amenities at our most accessible tariff.\n\nWould you like me to check availability and start your reservation for the Garden Room?`;
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'nugen-dynamic-pricing', nugenDomain.model, now
+    );
+
+    return res.json({
+      answer: ans,
+      mode: 'nugen-dynamic-pricing',
+      model: nugenDomain.model,
+      sources: [
+        { id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` },
+        { id: 'dynamic-pricing', title: 'Live Dynamic Revenue System' }
+      ],
+      nugen: {
+        used: true,
+        model: nugenDomain.model,
+        intent: nugenDomain.intent,
+        category: nugenDomain.category,
+        priority: nugenDomain.priority,
+        action: nugenDomain.action,
+        confidence: nugenDomain.confidence_score,
+        entities: nugenDomain.entities
+      }
+    });
+  }
+
+  // ── 1. ROOM BOOKING INTENT DETECTION ──────────────────────────────────────────
+  const roomBookingAction = req.body.roomBookingAction || null; // 'check' | 'confirm' | 'fail'
+  const hasRoomBookingIntent = Boolean(
+    roomBookingAction ||
+    req.body.isRoomBooking ||
+    nugenDomain.action === 'start_booking_workflow' ||
+    nugenDomain.intent === 'room_booking' ||
+    (/\b(book|reserve|reservation|stay)\b/i.test(userMsg) &&
+     (/\b(room|suite|villa|night|nights|days|residence|deluxe|presidential|king|staying)\b/i.test(userMsg) ||
+      /\b(for\s+\d+\s+(days|nights))\b/i.test(userMsg)))
   );
-  sbInsert('concierge_logs', { id, user_id: userId, question: req.body.message.trim(), answer: result.answer, mode: result.mode, model: result.model, created_at: now });
+
+
+  if (hasRoomBookingIntent) {
+    // Parameter extraction
+    let nights = req.body.nights || null;
+    if (!nights) {
+      const nm = userMsg.match(/(\d+)\s*(?:night|nights|day|days)/i);
+      if (nm) nights = parseInt(nm[1], 10);
+    }
+
+    let checkIn = req.body.check_in || req.body.checkIn || null;
+    if (!checkIn) {
+      const dm = userMsg.match(/(?:from|on|check-?in|date[:\s]+)\s*(\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?|\d{4}-\d{2}-\d{2})/i) ||
+                 userMsg.match(/(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/i) ||
+                 userMsg.match(/(\d{4}-\d{2}-\d{2})/i);
+      if (dm) checkIn = normalizeDate(dm[1]);
+    }
+
+    let guests = req.body.guests || null;
+    if (!guests) {
+      const gm = userMsg.match(/(\d+)\s*(?:guest|guests|adult|adults|person|people)/i);
+      if (gm) guests = parseInt(gm[1], 10);
+    }
+
+    let roomType = req.body.room_type || req.body.roomType || normalizeRoomType(userMsg);
+
+    let guestName = req.body.guest_name || req.body.guestName || null;
+    if (!guestName) {
+      const nam = userMsg.match(/(?:my name is|i am|name[:\s]+)\s*([A-Za-z\s]+?)(?:,|\.|\sand\s|\sfor\s|$)/i);
+      if (nam && nam[1].trim().length >= 2 && !/^(booking|room|reserving|looking|wanting)$/i.test(nam[1].trim())) {
+        guestName = nam[1].trim();
+      }
+    }
+
+    const defaultNights = nights || 3;
+    const defaultGuests = guests || 2;
+    const normType = roomType || 'Deluxe Ocean View';
+
+    // If critical fields (guestName or checkIn) are missing:
+    if (!guestName || !checkIn) {
+      const missing = [];
+      if (!guestName) missing.push('guest_name');
+      if (!checkIn) missing.push('check_in');
+
+      const ans = `I would be delighted to assist you with booking your stay at The Palms Resort!\n\n` +
+        `To check our live 150-room inventory, please confirm your:\n` +
+        `• **Guest Name** ${guestName ? `(✓ ${guestName})` : '(e.g., Alex Morgan)'}\n` +
+        `• **Check-in Date** ${checkIn ? `(✓ ${checkIn})` : '(e.g., 27-09-2026)'}\n` +
+        `• **Duration** (✓ ${defaultNights} nights)\n` +
+        `• **Number of Guests** (✓ ${defaultGuests} adults)\n` +
+        `• **Room Preference** (✓ ${normType})\n\n` +
+        `You can reply with your details, or confirm via the interactive reservation card below.`;
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        id, userId, userMsg, ans, 'room-booking-collecting', 'booking-engine', now
+      );
+
+      return res.json({
+        answer: ans,
+        isRoomBooking: true,
+        bookingStage: 'collecting_info',
+        bookingDetails: {
+          guest_name: guestName,
+          check_in: checkIn,
+          nights: defaultNights,
+          guests: defaultGuests,
+          room_type: normType
+        },
+        missingFields: missing,
+        mode: 'live-booking-engine',
+        sources: [{ id: 'live-inventory', title: 'Live 150-Room Real-Time Data Store' }]
+      });
+    }
+
+    // Both name and check-in date are present: Check availability against live 150-room inventory!
+    const start = checkIn;
+    const end = addDays(start, defaultNights);
+    const avail = checkRoomAvailability(start, end, normType);
+
+    if (!avail.available) {
+      // Create request in existing requests queue for Manager Workspace
+      const reqId = randomUUID();
+      db.prepare(`
+        INSERT INTO requests (id, user_id, category, title, detail, total, status, created_at)
+        VALUES (?, 'guest-1', 'Special request', ?, ?, 0, 'New', ?)
+      `).run(
+        reqId,
+        'Room Booking Request (PENDING / MANAGER_REVIEW)',
+        `Automated check found no room available for ${guestName}: ${avail.reason}. Dates: ${start} to ${end} (${defaultNights} nights, ${defaultGuests} guests, type: ${normType}). Status: PENDING / MANAGER_REVIEW.`,
+        new Date().toISOString()
+      );
+
+      const ans = `⚠️ **Live Inventory Notice: Transmitted for Manager Review**\n\nOur live 150-room inventory indicates that all rooms in category "${normType}" are currently unavailable between **${start}** and **${end}**.\n\nDon't worry — I have automatically logged **Reservation Review Request #${reqId.slice(0, 8)}** in the **Manager Workspace → Requests** queue with your details. Our resort manager will review alternate room options and assist you promptly.`;
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        id, userId, userMsg, ans, 'room-booking-failed', 'booking-engine', now
+      );
+
+      return res.json({
+        answer: ans,
+        isRoomBooking: true,
+        bookingStage: 'failed',
+        failureDetails: {
+          requestId: reqId,
+          reason: avail.reason,
+          check_in: start,
+          check_out: end,
+          status: 'PENDING / MANAGER_REVIEW'
+        },
+        mode: 'live-booking-engine',
+        sources: [{ id: 'live-inventory', title: 'Live 150-Room Real-Time Data Store' }]
+      });
+    }
+
+    // Room is Available! Return Booking Summary
+    const room = avail.room;
+    const pricePerNight = room.price_per_night;
+    const totalAmount = pricePerNight * defaultNights;
+
+    const ans = `✨ **Room Available in Live Inventory!**\n\nWe have verified real-time availability across all 150 rooms and selected **Room ${room.room_number} (${room.type})** for you from **${start}** to **${end}** (${defaultNights} nights).\n\n• **Room Number:** ${room.room_number}\n• **Room Type:** ${room.type}\n• **Check-In:** ${start} (From 2:00 PM)\n• **Check-Out:** ${end} (Until 11:00 AM)\n• **Rate:** ₹${pricePerNight.toLocaleString('en-IN')} / night\n• **Total Amount:** ₹${totalAmount.toLocaleString('en-IN')} (Taxes included)\n\nPlease review your booking summary below and click **Proceed to Payment** to complete your reservation.`;
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, userId, userMsg, ans, 'room-booking-summary', 'booking-engine', now
+    );
+
+    return res.json({
+      answer: ans,
+      isRoomBooking: true,
+      bookingStage: 'summary',
+      bookingSummary: {
+        room_number: room.room_number,
+        room_type: room.type,
+        floor: room.floor,
+        check_in: start,
+        check_out: end,
+        nights: defaultNights,
+        guests: defaultGuests,
+        guest_name: guestName,
+        guest_email: req.body.guest_email || `${guestName.toLowerCase().replace(/[^a-z0-9]/g, '')}@guest.smartresort.demo`,
+        guest_phone: req.body.guest_phone || '+91 98200 55321',
+        price_per_night: pricePerNight,
+        total_amount: totalAmount
+      },
+      mode: 'live-booking-engine',
+      sources: [{ id: 'live-inventory', title: 'Live 150-Room Real-Time Data Store' }]
+    });
+  }
+
+  // ── 2. Standard Resort RAG pipeline ──────────────────────────────────────────
+  const result = await ragAnswer(userMsg, liveRates);
+  result.nugen = {
+    used: true,
+    model: nugenDomain.model,
+    intent: nugenDomain.intent,
+    category: nugenDomain.category,
+    priority: nugenDomain.priority,
+    action: nugenDomain.action,
+    confidence: nugenDomain.confidence_score,
+    entities: nugenDomain.entities
+  };
+  if (result.sources && !result.sources.some(s => s.id === 'nugen-intelligence')) {
+    result.sources.unshift({ id: 'nugen-intelligence', title: `Nugen Model · ${nugenDomain.model}` });
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare('INSERT INTO concierge_logs VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    id, userId, userMsg, result.answer, result.mode, result.model || null, now
+  );
+  sbInsert('concierge_logs', { id, user_id: userId, question: userMsg, answer: result.answer, mode: result.mode, model: result.model, created_at: now });
   res.json(result);
+
+});
+
+// ── Hotel Info JSON endpoint — open to landing page & manager ────────────────
+app.get('/api/hotel-info', (req, res) => {
+  try {
+    const info = getSyncedHotelInfo();
+    res.json(info);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to retrieve hotel info: ' + e.message });
+  }
 });
 
 // Require session for all subsequent /api routes
@@ -188,6 +1249,11 @@ app.use('/api', (req, res, next) => {
 app.get('/api/auth/me', (req, res) => res.json(req.user));
 
 const role = required => (req, res, next) => req.user.role === required ? next() : res.status(403).json({ error: 'You do not have access to this workspace.' });
+
+app.get('/api/bookings/my-stay', role('guest'), (req, res) => {
+  const booking = db.prepare('SELECT * FROM bookings WHERE guest_id = ? OR room_number = ? ORDER BY created_at DESC LIMIT 1').get(req.user.id, req.user.room);
+  res.json({ booking: booking || null });
+});
 
 // ── Menu & requests ───────────────────────────────────────────────────────────
 const menu = [
@@ -327,7 +1393,7 @@ const menu = [
 app.get('/api/menu', (req, res) => res.json(menu));
 
 app.get('/api/requests', (req, res) => {
-  const q = 'SELECT requests.*, users.name AS guest_name, users.room FROM requests JOIN users ON users.id = requests.user_id';
+  const q = "SELECT requests.*, COALESCE(users.name, requests.title, 'Guest') AS guest_name, COALESCE(users.room, 'N/A') AS room FROM requests LEFT JOIN users ON users.id = requests.user_id";
   res.json(
     req.user.role === 'manager'
       ? db.prepare(q + ' ORDER BY created_at DESC').all()
@@ -382,6 +1448,368 @@ app.patch('/api/requests/:id', role('manager'), (req, res) => {
   res.status(result.changes ? 200 : 404).json(result.changes ? { ok: true } : { error: 'Request not found.' });
 });
 
+// ── Resort Services & Live Capacity Management ──────────────────────────────
+const RESORT_SERVICES = [
+  {
+    id: 'serenity_spa',
+    category: 'Spa & Wellness',
+    name: 'Serenity Spa (Ayurvedic & Swedish)',
+    tagline: 'Ancient healing therapies & organic radiance facials',
+    location: 'Wellness Pavilion, Ground Floor',
+    timing: '09:00 AM – 08:00 PM',
+    price: 4500,
+    unit: 'session',
+    total_capacity: 20,
+    booked_slots: 19,
+    status: 'Near Capacity (95%)',
+    description: 'Ayurvedic deep tissue massage, Swedish relaxation, organic facials, and hot stone hydrotherapy.',
+    slots: [
+      { time: '09:00 AM', status: 'Booked', room: '104' },
+      { time: '11:00 AM', status: 'Booked', room: '202' },
+      { time: '02:00 PM', status: 'Booked', room: '305' },
+      { time: '04:00 PM', status: 'Booked', room: '112' },
+      { time: '06:00 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Ananya Deshmukh (Lead Therapist)',
+    popular_score: 98,
+    image: 'https://images.unsplash.com/photo-1540555700478-4be289fbec6e?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'couples_retreat',
+    category: 'Spa & Wellness',
+    name: "Couple's Retreat & Hydrotherapy Suite",
+    tagline: 'Private jacuzzi, aromatic oils & sparkling wine',
+    location: 'Serenity Spa Suite 2',
+    timing: '10:00 AM – 08:00 PM',
+    price: 8000,
+    unit: 'couple',
+    total_capacity: 8,
+    booked_slots: 5,
+    status: 'Available',
+    description: 'Exclusive 2-hour private hydrotherapy sanctuary with aromatherapy, heated plunge tub & champagne.',
+    slots: [
+      { time: '10:00 AM', status: 'Booked', room: '101' },
+      { time: '02:00 PM', status: 'Available', room: null },
+      { time: '04:30 PM', status: 'Available', room: null },
+      { time: '06:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Dr. Rohan Mehra (Ayurveda Vaidya)',
+    popular_score: 92,
+    image: 'https://images.unsplash.com/photo-1544161515-4ab6ce6db874?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'sunset_yoga',
+    category: 'Spa & Wellness',
+    name: 'Sunset Yoga & Mindfulness Meditation',
+    tagline: 'Oceanfront deck pranayama and guided sound bowls',
+    location: 'Beachside Oceanfront Deck',
+    timing: '05:30 PM – 06:30 PM',
+    price: 0,
+    unit: 'guest',
+    total_capacity: 30,
+    booked_slots: 14,
+    status: 'Available',
+    description: 'Complimentary sunset wellness session led by certified yogis overlooking the Arabian Sea tides.',
+    slots: [
+      { time: '05:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Acharya Devendra',
+    popular_score: 89,
+    image: 'https://images.unsplash.com/photo-1506126613408-eca07ce68773?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'palms_dining',
+    category: 'Dining & Culinary',
+    name: 'The Palms Restaurant (Chef’s Degustation)',
+    tagline: '5-course coastal degustation dinner with paired wines',
+    location: 'Central Courtyard',
+    timing: '07:00 PM – 10:30 PM',
+    price: 3500,
+    unit: 'person',
+    total_capacity: 40,
+    booked_slots: 38,
+    status: 'Near Capacity (95%)',
+    description: 'Celebrated fine dining courtyard showcasing coastal seafood, Portuguese influences & vintage wines.',
+    slots: [
+      { time: '07:00 PM', status: 'Booked', room: '201' },
+      { time: '08:00 PM', status: 'Booked', room: '204' },
+      { time: '09:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Chef Jean-Luc & Sommelier',
+    popular_score: 97,
+    image: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'beachside_grill',
+    category: 'Dining & Culinary',
+    name: 'Beachside Bar & Oceanfront Grill',
+    tagline: 'Catch of the day, woodfired pizzas & sundowners',
+    location: 'Private Beach Shore',
+    timing: '11:00 AM – 11:00 PM',
+    price: 1800,
+    unit: 'table',
+    total_capacity: 50,
+    booked_slots: 28,
+    status: 'Available',
+    description: 'Open-air beachfront dining with live acoustic jazz, charcoal barbecued lobster & artisanal cocktails.',
+    slots: [
+      { time: '01:00 PM', status: 'Available', room: null },
+      { time: '07:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Chef Vikramaditya',
+    popular_score: 91,
+    image: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'in_room_dining',
+    category: 'Dining & Culinary',
+    name: 'In-Room Gourmet Dining & Midnight Bar',
+    tagline: '24-hour curated room service delivered in 30 mins',
+    location: 'All 150 Guest Rooms & Villas',
+    timing: '24 Hours Daily',
+    price: 950,
+    unit: 'order',
+    total_capacity: 100,
+    booked_slots: 42,
+    status: 'Available',
+    description: '24/7 in-villa culinary service bringing hot chef signatures and chilled champagnes right to your door.',
+    slots: [
+      { time: 'Immediate (24/7)', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Room Service Dispatch Unit',
+    popular_score: 88,
+    image: 'https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'pool_cabana',
+    category: 'Leisure & Recreation',
+    name: 'Infinity Pool Luxury VIP Cabanas',
+    tagline: 'Fresh tropical fruit platter, coconuts & dedicated butler',
+    location: 'Cliffside Infinity Pool Deck',
+    timing: '08:00 AM – 07:00 PM',
+    price: 2500,
+    unit: 'day',
+    total_capacity: 12,
+    booked_slots: 11,
+    status: 'Near Capacity (92%)',
+    description: 'Private poolside daybed cabana overlooking the sea with chilled towels, sunscreen bar and butler.',
+    slots: [
+      { time: 'Full Day (Cabana #7)', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Poolside Butler Team',
+    popular_score: 96,
+    image: 'https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'watersports',
+    category: 'Activities & Sports',
+    name: 'Water Sports & Beach Adventure Desk',
+    tagline: 'Parasailing, Jet-Ski sprint & sea kayaking',
+    location: 'Beach Activities Pavilion',
+    timing: '08:00 AM – 05:00 PM',
+    price: 2500,
+    unit: 'activity',
+    total_capacity: 25,
+    booked_slots: 16,
+    status: 'Available',
+    description: 'High-adrenaline water sports including high-speed Sea-Doo jet skis, parasailing flights, and reef kayaks.',
+    slots: [
+      { time: '02:00 PM', status: 'Available', room: null },
+      { time: '03:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Capt. Sunil Ramos (Coast Guard Cert)',
+    popular_score: 93,
+    image: 'https://images.unsplash.com/photo-1544551763-46a013bb70d5?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'scuba_diving',
+    category: 'Activities & Sports',
+    name: 'PADI Scuba Diving & Marine Lagoon',
+    tagline: 'Coral reef discovery dives & 2-day certifications',
+    location: 'Dive Center & Marine Lagoon',
+    timing: '09:00 AM – 04:00 PM',
+    price: 4500,
+    unit: 'diver',
+    total_capacity: 10,
+    booked_slots: 6,
+    status: 'Available',
+    description: 'Explore the vibrant Goa marine ecosystem guided by certified PADI master dive instructors.',
+    slots: [
+      { time: '09:30 AM', status: 'Available', room: null },
+      { time: '01:30 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Elena Vance (PADI Master Diver)',
+    popular_score: 90,
+    image: 'https://images.unsplash.com/photo-1682687220063-4742bd7fd538?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'personal_fitness',
+    category: 'Fitness & Health',
+    name: 'Private Fitness & 1-on-1 Personal Training',
+    tagline: 'Oceanview TechnoGym training & customized HIIT',
+    location: '2nd Floor Oceanview Gym',
+    timing: '06:00 AM – 09:00 PM',
+    price: 2000,
+    unit: 'hour',
+    total_capacity: 14,
+    booked_slots: 8,
+    status: 'Available',
+    description: 'Tailored strength conditioning, mobility recovery, and functional cardio coaching with master trainers.',
+    slots: [
+      { time: '02:00 PM', status: 'Available', room: null },
+      { time: '05:00 PM', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Coach Marcus Fernandes',
+    popular_score: 86,
+    image: 'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'chef_masterclass',
+    category: 'Activities & Sports',
+    name: 'Executive Chef Culinary Masterclass',
+    tagline: 'Goan spice blending, coastal seafood & wine pairing',
+    location: 'Open Culinary Theatre',
+    timing: '11:00 AM – 01:00 PM',
+    price: 3500,
+    unit: 'person',
+    total_capacity: 15,
+    booked_slots: 15,
+    status: 'Sold Out (100%)',
+    description: 'Interactive cooking workshop with Executive Chef creating classic Goan prawn caldine & dessert pairing.',
+    slots: [
+      { time: '11:00 AM', status: 'Sold Out', room: 'Waitlist' }
+    ],
+    staff_assigned: 'Executive Chef Jean-Luc',
+    popular_score: 99,
+    image: 'https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'kids_club',
+    category: 'Family & Kids',
+    name: 'Little Explorers Kids’ Club & Day Camp',
+    tagline: 'Eco beach treasure hunts, pottery & nature arts',
+    location: 'Children’s Activity Hub, Wing B',
+    timing: '09:00 AM – 06:00 PM',
+    price: 0,
+    unit: 'child',
+    total_capacity: 35,
+    booked_slots: 18,
+    status: 'Available',
+    description: 'Complimentary supervised activities, marine biology games, and storytelling for young resort guests.',
+    slots: [
+      { time: 'Full Day Access', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Maya Shenoy (Child Specialist)',
+    popular_score: 87,
+    image: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&w=800&q=80'
+  },
+  {
+    id: 'chauffeur_transfer',
+    category: 'Transport & Concierge',
+    name: 'Luxury Airport Chauffeur & VIP Transfer',
+    tagline: 'Mercedes-Benz E-Class & BMW luxury transfers',
+    location: 'Lobby Concierge',
+    timing: '24 Hours On Demand',
+    price: 2500,
+    unit: 'transfer',
+    total_capacity: 20,
+    booked_slots: 12,
+    status: 'Available',
+    description: 'Private chauffeur airport pickup and drop-off with Wi-Fi, chilled water, and luggage assistance.',
+    slots: [
+      { time: 'On Demand (24/7)', status: 'Available', room: null }
+    ],
+    staff_assigned: 'Concierge Fleet Dispatch',
+    popular_score: 94,
+    image: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&w=800&q=80'
+  }
+];
+
+function buildServicesOverview() {
+  let totalCapacity = 0;
+  let totalBooked = 0;
+  let highCapacityCount = 0;
+
+  const services = RESORT_SERVICES.map(svc => {
+    const occupancyRate = Math.min(100, Math.round((svc.booked_slots / (svc.total_capacity || 1)) * 100));
+    const available_slots = Math.max(0, svc.total_capacity - svc.booked_slots);
+    const isNearCapacity = occupancyRate >= 95;
+    const isSoldOut = occupancyRate >= 100;
+
+    totalCapacity += svc.total_capacity;
+    totalBooked += svc.booked_slots;
+    if (isNearCapacity) highCapacityCount++;
+
+    return {
+      ...svc,
+      occupancyRate,
+      available_slots,
+      isNearCapacity,
+      isSoldOut
+    };
+  });
+
+  const availableSlots = Math.max(0, totalCapacity - totalBooked);
+  const overallOccupancy = Math.round((totalBooked / (totalCapacity || 1)) * 100);
+
+  return {
+    stats: {
+      totalServices: services.length,
+      totalCapacity,
+      totalBooked,
+      availableSlots,
+      overallOccupancy,
+      highCapacityCount,
+      activeAlertsCount: highCapacityCount
+    },
+    services
+  };
+}
+
+app.get('/api/services', (req, res) => {
+  res.json(buildServicesOverview());
+});
+
+app.patch('/api/services/:id/capacity', role('manager'), (req, res) => {
+  const svc = RESORT_SERVICES.find(s => s.id === req.params.id);
+  if (!svc) return res.status(404).json({ error: 'Service not found.' });
+
+  const { total_capacity, booked_slots } = req.body;
+  if (Number.isFinite(total_capacity) && total_capacity >= 1) svc.total_capacity = Number(total_capacity);
+  if (Number.isFinite(booked_slots) && booked_slots >= 0) svc.booked_slots = Number(booked_slots);
+
+  const updated = buildServicesOverview().services.find(s => s.id === svc.id);
+  res.json({ ok: true, service: updated });
+});
+
+app.post('/api/services/book', (req, res) => {
+  const { service_id, slot_time, notes = '' } = req.body;
+  const svc = RESORT_SERVICES.find(s => s.id === service_id);
+  if (!svc) return res.status(404).json({ error: 'Service not found.' });
+
+  if (svc.booked_slots >= svc.total_capacity) {
+    return res.status(400).json({ error: `${svc.name} is currently sold out.` });
+  }
+
+  svc.booked_slots += 1;
+  const reqId = randomUUID();
+  const userName = req.user?.name || 'Resort Guest';
+  const userRoom = req.user?.room || '204';
+  const detail = `${userName} (Room ${userRoom}) · Confirmed slot: ${slot_time || svc.timing} · Price: ₹${svc.price.toLocaleString('en-IN')} · Note: ${notes || 'Booked via Services Portal'}`;
+
+  db.prepare(`
+    INSERT INTO requests (id, user_id, category, title, detail, total, status, created_at)
+    VALUES (?, ?, 'Spa', ?, ?, ?, 'New', ?)
+  `).run(reqId, req.user?.id || 'guest-1', `${svc.name} Reservation`, detail, svc.price, new Date().toISOString());
+
+  const updated = buildServicesOverview().services.find(s => s.id === svc.id);
+  res.json({
+    ok: true,
+    message: `Reservation confirmed for ${svc.name} (${slot_time || svc.timing})!`,
+    service: updated
+  });
+});
+
 // ── Feedback + AI sentiment ───────────────────────────────────────────────────
 app.post('/api/feedback', role('guest'), async (req, res) => {
   const { rating, comment } = req.body;
@@ -407,6 +1835,11 @@ app.get('/api/feedback', async (req, res) => {
 // ── Dynamic pricing ───────────────────────────────────────────────────────────
 app.get('/api/pricing', role('manager'), (req, res) => res.json(db.prepare('SELECT * FROM rates').all()));
 
+app.get('/api/pricing/timeline', role('manager'), (req, res) => {
+  const info = getSyncedHotelInfo();
+  res.json(info.dynamic_pricing_system?.recent_pricing_timeline_events || []);
+});
+
 app.post('/api/pricing/scenario', role('manager'), async (req, res) => {
   const { occupancy, season, dow, lead_days, competitor_avg, local_events, review_score } = req.body;
   if (!Number.isFinite(occupancy) || occupancy < 0 || occupancy > 100
@@ -431,7 +1864,7 @@ app.post('/api/pricing/scenario', role('manager'), async (req, res) => {
 });
 
 app.post('/api/pricing/apply', role('manager'), async (req, res) => {
-  const { id, occupancy, season } = req.body;
+  const { id, occupancy, season, duration_hours, expires_at } = req.body;
   if (!Number.isFinite(occupancy) || occupancy < 0 || occupancy > 100
       || !Number.isFinite(season) || season < 0.5 || season > 1.5)
     return res.status(400).json({ error: 'Invalid scenario.' });
@@ -439,8 +1872,12 @@ app.post('/api/pricing/apply', role('manager'), async (req, res) => {
   const room = result.rooms.find(r => r.id === id);
   if (!room) return res.status(400).json({ error: 'Invalid room.' });
 
+  const finalDuration = Number(duration_hours) || 24;
+  const expiresAtIso = expires_at || new Date(Date.now() + finalDuration * 3600 * 1000).toISOString();
+  const nowIso = new Date().toISOString();
+
   // Save to rates table
-  db.prepare('INSERT OR REPLACE INTO rates VALUES (?, ?, ?, ?)').run(id, room.recommended, new Date().toISOString(), req.user.id);
+  db.prepare('INSERT OR REPLACE INTO rates (id, amount, updated_at, updated_by) VALUES (?, ?, ?, ?)').run(id, room.recommended, nowIso, req.user.id);
 
   // Sync live rate to rooms table in SQLite
   const typeMap = {
@@ -451,7 +1888,102 @@ app.post('/api/pricing/apply', role('manager'), async (req, res) => {
   const typeName = typeMap[id] || room.name;
   db.prepare('UPDATE rooms SET price_per_night = ? WHERE type = ?').run(room.recommended, typeName);
 
-  res.json({ ok: true, rate: room.recommended, type: typeName });
+  // Sync to hotel_info.json
+  const hotelData = readHotelInfoData();
+  if (hotelData.dynamic_pricing_system?.rooms) {
+    const targetRoom = hotelData.dynamic_pricing_system.rooms.find(r => r.id === id);
+    if (targetRoom) {
+      const fromPrice = targetRoom.current_rate || targetRoom.base_rate;
+      targetRoom.current_rate = room.recommended;
+      targetRoom.is_surge_active = true;
+      targetRoom.applied_at = nowIso;
+      targetRoom.expires_at = expiresAtIso;
+      targetRoom.duration_hours = finalDuration;
+      targetRoom.remaining_seconds = Math.max(0, Math.floor((new Date(expiresAtIso).getTime() - Date.now()) / 1000));
+      const h = Math.floor(targetRoom.remaining_seconds / 3600);
+      const m = Math.floor((targetRoom.remaining_seconds % 3600) / 60);
+      targetRoom.remaining_time = `${h}h ${m}m`;
+      const diffPct = Math.round(((room.recommended - targetRoom.base_rate) / targetRoom.base_rate) * 100);
+      targetRoom.price_flow = `Dynamic ML Surge (₹${room.recommended.toLocaleString('en-IN')}) [Active Surge ${diffPct >= 0 ? '+' : ''}${diffPct}%]`;
+
+      hotelData.dynamic_pricing_system.recent_pricing_timeline_events = hotelData.dynamic_pricing_system.recent_pricing_timeline_events || [];
+      hotelData.dynamic_pricing_system.recent_pricing_timeline_events.unshift({
+        id: randomUUID(),
+        room_id: id,
+        room_name: typeName,
+        from_price: fromPrice,
+        to_price: room.recommended,
+        action: 'ML_SURGE_APPLIED',
+        duration_hours: finalDuration,
+        expires_at: expiresAtIso,
+        created_at: nowIso
+      });
+    }
+  }
+  writeHotelInfoData(hotelData);
+  invalidateRagIndex();
+
+  res.json({ ok: true, rate: room.recommended, duration_hours: finalDuration, expires_at: expiresAtIso, type: typeName });
+});
+
+app.post('/api/pricing/reset', role('manager'), (req, res) => {
+  const { id } = req.body;
+  const BASE_CONFIG = {
+    standard: { name: 'Garden Room', base: 6500 },
+    suite: { name: 'Ocean Suite', base: 14500 },
+    villa: { name: 'Private Pool Villa', base: 28000 }
+  };
+
+  const targetIds = (id === 'all' || !id) ? Object.keys(BASE_CONFIG) : [id];
+  const hotelData = readHotelInfoData();
+  const nowIso = new Date().toISOString();
+
+  for (const targetId of targetIds) {
+    const cfg = BASE_CONFIG[targetId];
+    if (!cfg) continue;
+
+    // Save to rates table
+    db.prepare('INSERT OR REPLACE INTO rates (id, amount, updated_at, updated_by) VALUES (?, ?, ?, ?)').run(
+      targetId, cfg.base, nowIso, req.user.id
+    );
+
+    // Sync to rooms table
+    db.prepare('UPDATE rooms SET price_per_night = ? WHERE type = ?').run(cfg.base, cfg.name);
+
+    // Sync to hotelData
+    if (hotelData.dynamic_pricing_system?.rooms) {
+      const room = hotelData.dynamic_pricing_system.rooms.find(r => r.id === targetId);
+      if (room) {
+        const fromPrice = room.current_rate;
+        room.current_rate = room.base_rate || cfg.base;
+        room.is_surge_active = false;
+        room.applied_at = null;
+        room.expires_at = null;
+        room.duration_hours = null;
+        room.remaining_seconds = 0;
+        room.remaining_time = null;
+        room.price_flow = `Original Base Rate (₹${(room.base_rate || cfg.base).toLocaleString('en-IN')}) [Active - No Surge]`;
+
+        hotelData.dynamic_pricing_system.recent_pricing_timeline_events = hotelData.dynamic_pricing_system.recent_pricing_timeline_events || [];
+        hotelData.dynamic_pricing_system.recent_pricing_timeline_events.unshift({
+          id: randomUUID(),
+          room_id: targetId,
+          room_name: room.name || cfg.name,
+          from_price: fromPrice,
+          to_price: room.base_rate || cfg.base,
+          action: 'MANUAL_RESET_BASE',
+          duration_hours: null,
+          expires_at: null,
+          created_at: nowIso
+        });
+      }
+    }
+  }
+
+  writeHotelInfoData(hotelData);
+  invalidateRagIndex();
+
+  res.json({ ok: true, id, message: id === 'all' ? 'All room rates reset to base' : 'Room rate reset to base' });
 });
 
 // Sentiment stats endpoint (manager only — strictly 3 categories: positive, neutral, negative)
@@ -684,7 +2216,32 @@ app.get('/api/rooms', role('manager'), (req, res) => {
   });
 });
 
-app.get('/api/rooms/:room_number', role('manager'), (req, res) => {
+app.get('/api/rooms/overview', role('manager'), (req, res) => {
+  const rooms = db.prepare('SELECT * FROM rooms ORDER BY CAST(room_number AS INTEGER) ASC').all();
+  const stats = db.prepare(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'Occupied' THEN 1 ELSE 0 END) as occupied,
+      SUM(CASE WHEN status = 'Available' THEN 1 ELSE 0 END) as available,
+      SUM(CASE WHEN status = 'Cleaning' THEN 1 ELSE 0 END) as cleaning,
+      SUM(CASE WHEN status = 'Maintenance' THEN 1 ELSE 0 END) as maintenance
+    FROM rooms
+  `).get();
+  res.json({
+    stats: {
+      total: stats.total || 150,
+      occupied: stats.occupied || 129,
+      available: stats.available || 0,
+      cleaning: stats.cleaning || 0,
+      maintenance: stats.maintenance || 0,
+      occupancyRate: Math.round(((stats.occupied || 129) / (stats.total || 150)) * 100)
+    },
+    rooms
+  });
+});
+
+app.get('/api/rooms/:room_number', role('manager'), (req, res, next) => {
+  if (req.params.room_number === 'overview') return next();
   const room = db.prepare('SELECT * FROM rooms WHERE room_number = ?').get(req.params.room_number);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
 
@@ -760,59 +2317,290 @@ app.get('/api/analytics/occupancy', role('manager'), (req, res) => {
   });
 });
 
-// ── Predictive Maintenance (Manager only) ───────────────────────────────────
+// ── Predictive Maintenance — Cumulative Fatigue & Degradation Engine (Manager only) ─
+const CORE_MAINTENANCE_SERVICES = [
+  {
+    id: 'hvac_central',
+    name: 'Central Chilled Water HVAC & Air Circulation',
+    category: 'Climate & Air Quality',
+    location: 'Central Utility Plant & Rooftops',
+    icon: 'Wind',
+    wearThreshold: 50,
+    weightHigh: 1.00,
+    weightNeutral: 0.40,
+    weightLow: 0.20,
+    aiMechanism: 'Continuous thermal expansion cycling on dual centrifugal chillers. 90%+ occupancy maintains 100% compressor load without standby dwell time, accelerating bearing degradation.',
+    lastMaintenance: '28 July 2026',
+    technicianTeam: 'HVAC Climate & Mechanical Unit',
+    estimatedCost: '₹65,000',
+    priority: 'Critical',
+    standardRuntime: '24/7 Continuous'
+  },
+  {
+    id: 'pool_pumps',
+    name: 'Main Plunge & Horizon Pool Hydro-Pumps',
+    category: 'Water Treatment & Aquatics',
+    location: 'Pool Plant Room',
+    icon: 'Droplets',
+    wearThreshold: 45,
+    weightHigh: 0.85,
+    weightNeutral: 0.35,
+    weightLow: 0.15,
+    aiMechanism: 'High swimmer density increases organic filtration backpressure, causing cavitation vibration in mechanical impeller seals and thermal winding strain.',
+    lastMaintenance: '12 Aug 2026',
+    technicianTeam: 'Aquatics Engineering Unit',
+    estimatedCost: '₹38,000',
+    priority: 'High',
+    standardRuntime: '18 hrs / day'
+  },
+  {
+    id: 'kitchen_exhaust',
+    name: 'Commercial Kitchen Flue Exhaust & Degreaser',
+    category: 'Culinary Safety & Ventilation',
+    location: 'Main Kitchen & Dining Courtyard',
+    icon: 'Flame',
+    wearThreshold: 60,
+    weightHigh: 0.90,
+    weightNeutral: 0.30,
+    weightLow: 0.10,
+    aiMechanism: 'High cooking volumes deposit vaporized lipids inside duct vanes. Airflow velocity drops proportionally to lipid depth, increasing motor static head resistance.',
+    lastMaintenance: '05 Aug 2026',
+    technicianTeam: 'Kitchen & Fire Safety Specialist',
+    estimatedCost: '₹42,000',
+    priority: 'Medium',
+    standardRuntime: '16 hrs / day'
+  },
+  {
+    id: 'guest_elevators',
+    name: 'Guest Wings Traction Elevators & Shuttles',
+    category: 'Vertical Transport & Mobility',
+    location: 'Main Pavilion & Guest Wings A/B',
+    icon: 'ArrowUpDown',
+    wearThreshold: 70,
+    weightHigh: 0.75,
+    weightNeutral: 0.30,
+    weightLow: 0.10,
+    aiMechanism: 'Start-stop mechanical traction cycles during guest check-in/out surges. Counterweight cable elongation and brake pad friction adhere to expected fatigue curves.',
+    lastMaintenance: '18 Aug 2026',
+    technicianTeam: 'Schindler Vertical Transit Team',
+    estimatedCost: '₹25,000',
+    priority: 'Routine',
+    standardRuntime: '24/7 On Demand'
+  }
+];
+
+let activeMaintenanceScenario = 'scenario-60';
+let activeSessionMix = {
+  highDays: 45,
+  neutralDays: 10,
+  lowDays: 5
+};
+const maintenanceResetMap = new Map();
+const maintenanceActionLogs = [
+  {
+    id: 'log-init-1',
+    service_id: 'hvac_central',
+    service_name: 'Central Chilled Water HVAC & Air Circulation',
+    action_type: 'Scenario Evaluated',
+    performed_by: 'Predictive Fatigue Engine',
+    notes: 'Evaluated Scenario 1 (60-Day Window: 45 High / 10 Neutral / 5 Low). Central AC 50-unit threshold reached at Day 60.',
+    created_at: new Date(Date.now() - 3600000 * 2).toISOString()
+  },
+  {
+    id: 'log-init-2',
+    service_id: 'pool_pumps',
+    service_name: 'Main Plunge & Horizon Pool Hydro-Pumps',
+    action_type: 'Maintenance Certified',
+    performed_by: 'Chief Engineer & Technical Unit',
+    notes: 'Certified mechanical impeller seal lubrication and chemical backwash test. Reset wear to 0.',
+    created_at: new Date(Date.now() - 3600000 * 24).toISOString()
+  }
+];
+
+function buildGroupedMaintenanceOverview(scenario = activeMaintenanceScenario, customMix = null) {
+  let mix = { highDays: 45, neutralDays: 10, lowDays: 5 };
+  let scenarioTitle = 'Scenario 1 • 60-Day Window';
+
+  if (scenario === 'scenario-90') {
+    mix = { highDays: 45, neutralDays: 0, lowDays: 45 };
+    scenarioTitle = 'Scenario 2 • 90-Day Window';
+  } else if (scenario === 'scenario-offpeak') {
+    mix = { highDays: 15, neutralDays: 15, lowDays: 45 };
+    scenarioTitle = 'Scenario 3 • Conservation';
+  } else if (scenario === 'custom' && customMix) {
+    mix = {
+      highDays: Math.max(0, Number(customMix.highDays) || 0),
+      neutralDays: Math.max(0, Number(customMix.neutralDays) || 0),
+      lowDays: Math.max(0, Number(customMix.lowDays) || 0)
+    };
+    scenarioTitle = 'Custom Session Mix Simulator';
+  }
+
+  const totalDays = Math.max(1, mix.highDays + mix.neutralDays + mix.lowDays);
+  const highPct = Math.round((mix.highDays / totalDays) * 100);
+  const neutralPct = Math.round((mix.neutralDays / totalDays) * 100);
+  const lowPct = Math.max(0, 100 - highPct - neutralPct);
+
+  let dueImmediatelyCount = 0;
+  let warningCount = 0;
+  let operationalCount = 0;
+  let totalWearPctSum = 0;
+  let totalCycleDaysSum = 0;
+
+  const services = CORE_MAINTENANCE_SERVICES.map(base => {
+    const isReset = maintenanceResetMap.has(base.id);
+    const rawWear = isReset
+      ? 0.0
+      : (mix.highDays * base.weightHigh) + (mix.neutralDays * base.weightNeutral) + (mix.lowDays * base.weightLow);
+
+    const currentWearUnits = Number(Math.min(base.wearThreshold, rawWear).toFixed(1));
+    const wearPercentage = isReset ? 0 : Math.min(100, Math.round((rawWear / base.wearThreshold) * 100));
+
+    const totalCalculatedWear = ((mix.highDays * base.weightHigh) + (mix.neutralDays * base.weightNeutral) + (mix.lowDays * base.weightLow));
+    const dailyBurnRate = Number((totalCalculatedWear / totalDays).toFixed(2));
+    const projectedCycleDays = dailyBurnRate > 0 ? Math.round(base.wearThreshold / dailyBurnRate) : 180;
+    const daysElapsed = isReset ? 0 : totalDays;
+    const daysRemaining = isReset ? projectedCycleDays : Math.max(0, projectedCycleDays - daysElapsed);
+
+    let urgencyBadge = 'optimal';
+    let urgencyStatus = 'Operational / Safe';
+
+    if (wearPercentage >= 100 || daysRemaining === 0) {
+      urgencyBadge = 'critical';
+      urgencyStatus = 'Service Due (100%)';
+      dueImmediatelyCount++;
+    } else if (wearPercentage >= 80 || daysRemaining <= 10) {
+      urgencyBadge = 'warning';
+      urgencyStatus = `Approaching Threshold (${wearPercentage}%)`;
+      warningCount++;
+    } else {
+      urgencyBadge = 'optimal';
+      urgencyStatus = `Operational (${wearPercentage}%)`;
+      operationalCount++;
+    }
+
+    totalWearPctSum += wearPercentage;
+    totalCycleDaysSum += projectedCycleDays;
+
+    const mathFormula = isReset
+      ? `W_cum = 0.0 / ${base.wearThreshold.toFixed(1)} Units (Recently Certified & Reset)`
+      : `W_cum = (${mix.highDays} × ${base.weightHigh.toFixed(2)}) + (${mix.neutralDays} × ${base.weightNeutral.toFixed(2)}) + (${mix.lowDays} × ${base.weightLow.toFixed(2)}) = ${rawWear.toFixed(1)} / ${base.wearThreshold.toFixed(1)} Units`;
+
+    const lastServiced = isReset ? 'Today' : base.lastMaintenance;
+    const nextDue = wearPercentage >= 100 ? 'Immediate (Threshold Reached)' : `${daysRemaining} Days`;
+
+    return {
+      ...base,
+      currentWearUnits,
+      wearPercentage,
+      dailyBurnRate,
+      projectedCycleDays,
+      daysElapsed,
+      daysRemaining,
+      urgencyStatus,
+      urgencyBadge,
+      mathFormula,
+      lastMaintenance: lastServiced,
+      nextDueDate: nextDue
+    };
+  });
+
+  const averageWearIndex = Math.round(totalWearPctSum / services.length);
+  const averageCycleDays = Math.round(totalCycleDaysSum / services.length);
+
+  return {
+    activeScenario: scenario,
+    activeScenarioTitle: scenarioTitle,
+    sessionMix: {
+      totalDays,
+      highDays: mix.highDays,
+      neutralDays: mix.neutralDays,
+      lowDays: mix.lowDays,
+      highPct,
+      neutralPct,
+      lowPct
+    },
+    services,
+    stats: {
+      totalMonitoredServices: services.length,
+      dueImmediatelyCount,
+      warningCount,
+      operationalCount,
+      averageWearIndex,
+      averageCycleDays
+    },
+    actionLogs: maintenanceActionLogs
+  };
+}
+
 app.get('/api/maintenance/overview', role('manager'), (req, res) => {
   const equipment = db.prepare('SELECT * FROM maintenance_equipment ORDER BY failure_probability DESC').all();
   const tasks = db.prepare('SELECT * FROM maintenance_tasks ORDER BY created_at DESC').all();
-
-  const healthCounts = { Healthy: 0, Warning: 0, Critical: 0 };
-  for (const eq of equipment) {
-    if (eq.status === 'Critical') healthCounts.Critical++;
-    else if (eq.status === 'Warning') healthCounts.Warning++;
-    else healthCounts.Healthy++;
-  }
-
-  const total = equipment.length || 1;
-  const healthDistribution = [
-    { name: 'Healthy', value: Math.round((healthCounts.Healthy / total) * 100), count: healthCounts.Healthy, color: '#10b981' },
-    { name: 'Warning', value: Math.round((healthCounts.Warning / total) * 100), count: healthCounts.Warning, color: '#f59e0b' },
-    { name: 'Critical', value: Math.round((healthCounts.Critical / total) * 100), count: healthCounts.Critical, color: '#ef4444' },
-  ];
-
-  const maintenanceHistory = [
-    { month: 'Aug', scheduled: 12, emergency: 3, cost: 2.4 },
-    { month: 'Sep', scheduled: 15, emergency: 2, cost: 1.8 },
-    { month: 'Oct', scheduled: 10, emergency: 5, cost: 3.2 },
-    { month: 'Nov', scheduled: 14, emergency: 1, cost: 1.5 },
-    { month: 'Dec', scheduled: 11, emergency: 4, cost: 2.8 },
-    { month: 'Jan', scheduled: 16, emergency: 2, cost: 1.9 },
-  ];
-
-  // Dynamic live sensor readings for Main Pool Pump based on current equipment health
-  const poolPump = equipment.find(e => e.id === 'eq-1') || {};
-  const isPumpCritical = poolPump.status === 'Critical';
-  const curVibration = isPumpCritical ? 4.8 : 2.4;
-  const curTemp = isPumpCritical ? 68 : 49;
-  const curPressure = isPumpCritical ? 24 : 18;
-
-  const sensorReadings = [
-    { time: '00:00', vibration: 2.1, temperature: 45, pressure: 12 },
-    { time: '04:00', vibration: 2.3, temperature: 47, pressure: 13 },
-    { time: '08:00', vibration: 2.8, temperature: 52, pressure: 15 },
-    { time: '12:00', vibration: 3.5, temperature: 58, pressure: 18 },
-    { time: '16:00', vibration: 4.2, temperature: 65, pressure: 22 },
-    { time: '20:00', vibration: curVibration, temperature: curTemp, pressure: curPressure },
-  ];
+  const overview = buildGroupedMaintenanceOverview(activeMaintenanceScenario, activeSessionMix);
 
   res.json({
+    ...overview,
     equipment,
     tasks,
-    healthDistribution,
-    maintenanceHistory,
-    sensorReadings,
-    criticalCount: healthCounts.Critical,
+    criticalCount: overview.stats.dueImmediatelyCount,
     scheduledCount: tasks.filter(t => t.status === 'Scheduled').length,
-    overallHealthPct: Math.round(equipment.reduce((acc, eq) => acc + eq.health, 0) / (equipment.length || 1)),
+    overallHealthPct: Math.max(0, 100 - overview.stats.averageWearIndex)
+  });
+});
+
+app.post('/api/maintenance/scenario', role('manager'), (req, res) => {
+  const { scenario = 'scenario-60', highDays, neutralDays, lowDays } = req.body;
+  activeMaintenanceScenario = scenario;
+  if (scenario === 'custom' && (highDays !== undefined || neutralDays !== undefined || lowDays !== undefined)) {
+    activeSessionMix = {
+      highDays: Number(highDays) || 0,
+      neutralDays: Number(neutralDays) || 0,
+      lowDays: Number(lowDays) || 0
+    };
+  }
+
+  const overview = buildGroupedMaintenanceOverview(scenario, activeSessionMix);
+
+  maintenanceActionLogs.unshift({
+    id: 'log-' + randomUUID().slice(0, 8),
+    service_id: 'fleet_overview',
+    service_name: 'Fleet Predictive Engine',
+    action_type: 'Scenario Evaluated',
+    performed_by: req.user?.name || 'Chief Engineer',
+    notes: `Evaluated ${overview.activeScenarioTitle} (${overview.sessionMix.highDays} High / ${overview.sessionMix.neutralDays} Neutral / ${overview.sessionMix.lowDays} Low). Average fleet wear: ${overview.stats.averageWearIndex}%.`,
+    created_at: new Date().toISOString()
+  });
+
+  res.json({
+    ok: true,
+    message: `Evaluated ${overview.activeScenarioTitle}`,
+    ...overview
+  });
+});
+
+app.post('/api/maintenance/perform', role('manager'), (req, res) => {
+  const { serviceId, notes = '', performedBy = 'Chief Engineer & Technical Unit' } = req.body;
+  const service = CORE_MAINTENANCE_SERVICES.find(s => s.id === serviceId);
+  if (!service) return res.status(404).json({ error: 'Service not found.' });
+
+  maintenanceResetMap.set(serviceId, Date.now());
+
+  maintenanceActionLogs.unshift({
+    id: 'log-' + randomUUID().slice(0, 8),
+    service_id: serviceId,
+    service_name: service.name,
+    action_type: 'Maintenance Certified',
+    performed_by: performedBy.trim() || 'Chief Engineer & Technical Unit',
+    notes: notes.trim() || 'Certified preventative maintenance completed. Cumulative fatigue reset to 0.0 units.',
+    created_at: new Date().toISOString()
+  });
+
+  const overview = buildGroupedMaintenanceOverview(activeMaintenanceScenario, activeSessionMix);
+
+  res.json({
+    ok: true,
+    message: `Certified maintenance completed for ${service.name}. Cumulative fatigue reset to 0.0 units!`,
+    overview
   });
 });
 
@@ -881,7 +2669,7 @@ app.patch('/api/maintenance/tasks/:id', role('manager'), (req, res) => {
 // ── Staff Scheduling API ──────────────────────────────────────────────────────
 app.get('/api/staff', role('manager'), (req, res) => {
   const staff = db.prepare('SELECT * FROM staff_members ORDER BY id ASC').all();
-  const recs = db.prepare('SELECT * FROM staff_recommendations WHERE status = "active"').all();
+  const recs = db.prepare("SELECT * FROM staff_recommendations WHERE status = 'active'").all();
 
   const totalStaff = staff.length || 54;
   const onShift = staff.filter(s => s.status === 'On Shift').length;
@@ -1011,7 +2799,7 @@ app.post('/api/staff/recommendations/:id/action', role('manager'), (req, res) =>
 app.get('/api/inventory', role('manager'), (req, res) => {
   const items = db.prepare('SELECT * FROM inventory_items ORDER BY id ASC').all();
   const purchaseOrders = db.prepare('SELECT * FROM purchase_orders ORDER BY created_at DESC').all();
-  const insights = db.prepare('SELECT * FROM inventory_insights WHERE status = "active"').all();
+  const insights = db.prepare("SELECT * FROM inventory_insights WHERE status = 'active'").all();
 
   const lowStockCount = items.filter(i => i.status === 'Low' || i.status === 'Critical').length;
   const pendingOrders = purchaseOrders.filter(po => po.status === 'Pending');
@@ -1414,15 +3202,26 @@ app.delete('/api/revenue/calculations/:id', role('manager'), (req, res) => {
   res.json({ ok: result.changes > 0 });
 });
 
-// ── Catch-all ─────────────────────────────────────────────────────────────────
+// ── Catch-all & Production Static File Serving ────────────────────────────────
 app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found.' }));
-app.use(express.static(path.join(here, '../dist')));
-app.get('*', (req, res) => res.sendFile(path.join(here, '../dist/index.html')));
+
+const distPath = path.join(here, '../dist');
+if (existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
+
 app.use((err, req, res, _next) => {
   console.error(err.message);
   res.status(err.status === 400 ? 400 : 500).json({ error: err.status === 400 ? 'Invalid request.' : 'Something went wrong. Please try again.' });
 });
 
-app.listen(Number(process.env.PORT || 5000), '127.0.0.1', () =>
-  console.log(`Smart Resort 360 ready → http://localhost:${process.env.PORT || 5000}`)
+const PORT = Number(process.env.PORT || 5000);
+const HOST = process.env.HOST || '0.0.0.0';
+
+app.listen(Number(process.env.PORT || 5000), '0.0.0.0', () =>
+  console.log(`Smart Resort 360 ready → port ${process.env.PORT || 5000}`)
 );

@@ -275,5 +275,311 @@ export function seedResortData(db) {
     insertInsight.run(2, 'High', 'Chicken Demand Spike', 'Weekend buffet booking increased demand forecast by 40%. Current stock insufficient.', 'Increase meat order by 15kg for Friday delivery', 'Avoid menu compromises', 'active', 'increase_chicken');
     insertInsight.run(3, 'Medium', 'Bulk Purchase Opportunity', 'Rice consumption stable across all 129 occupied rooms. Buying 500kg would secure 12% discount from supplier.', 'Consider bulk purchase before month-end', 'Save ₹4,200 monthly', 'active', 'bulk_rice');
   }
+
+  // ── Seed Resort Services Live Capacity & Slots Inventory ────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS resort_services (
+      id TEXT PRIMARY KEY,
+      category TEXT,
+      name TEXT,
+      tagline TEXT,
+      location TEXT,
+      timing TEXT,
+      price INTEGER,
+      unit TEXT,
+      total_capacity INTEGER,
+      booked_slots INTEGER,
+      status TEXT,
+      description TEXT,
+      slots TEXT,
+      staff_assigned TEXT,
+      popular_score REAL,
+      image TEXT
+    );
+  `);
+
+  const servCount = db.prepare('SELECT COUNT(*) as count FROM resort_services').get().count;
+  if (servCount === 0) {
+    console.log('[Seed] Seeding resort services with live capacity, slots & 95% utilization testcases...');
+    const insertService = db.prepare(`
+      INSERT INTO resort_services (
+        id, category, name, tagline, location, timing, price, unit,
+        total_capacity, booked_slots, status, description, slots, staff_assigned, popular_score, image
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const services = [
+      [
+        'serenity_spa',
+        'Spa & Wellness',
+        'Serenity Spa (Ayurvedic & Swedish Therapies)',
+        'Ancient botanical healing & holistic body treatments',
+        'Wellness Pavilion, Ground Floor',
+        '09:00 AM – 08:00 PM',
+        4500,
+        '90-min Relaxation Journey',
+        20,
+        19,
+        'Near Capacity (95%)',
+        'Deep tissue Swedish massage, classical Abhyanga Ayurvedic warm oil therapies, herbal poultices and organic radiance facials.',
+        JSON.stringify([
+          { time: '09:00 AM', status: 'Booked', room: '104' },
+          { time: '10:30 AM', status: 'Booked', room: '202' },
+          { time: '12:00 PM', status: 'Booked', room: '305' },
+          { time: '01:30 PM', status: 'Booked', room: '112' },
+          { time: '03:00 PM', status: 'Booked', room: '218' },
+          { time: '04:30 PM', status: 'Booked', room: '308' },
+          { time: '06:00 PM', status: 'Available', room: null }
+        ]),
+        'Dr. Ananya Rao & 4 Master Therapists',
+        4.9,
+        'https://images.unsplash.com/photo-1540555700478-4be289fbecef?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'couples_retreat',
+        'Spa & Wellness',
+        "Couple's Retreat & Hydrotherapy Suite",
+        'Private hydrotherapy sanctuary with sparkling wine',
+        'Serenity Spa Suite 2',
+        '10:00 AM – 08:00 PM',
+        8000,
+        '2-hour couple suite',
+        8,
+        5,
+        'Available',
+        'Private hydrotherapy jacuzzi soak followed by dual synchronized full body aromatherapy massages and chilled artisan prosecco.',
+        JSON.stringify([
+          { time: '10:00 AM', status: 'Booked', room: '204' },
+          { time: '12:00 PM', status: 'Booked', room: '108' },
+          { time: '02:00 PM', status: 'Available', room: null },
+          { time: '04:30 PM', status: 'Available', room: null },
+          { time: '06:30 PM', status: 'Available', room: null }
+        ]),
+        'Senior Spa Concierge',
+        4.8,
+        'https://images.unsplash.com/photo-1600334129128-685c5582fd35?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'sunset_yoga',
+        'Spa & Wellness',
+        'Sunset Yoga & Mindfulness Meditation',
+        'Oceanfront mindfulness overlooking Arabian Sea',
+        'Beachside Ocean Deck',
+        '07:00 AM & 05:30 PM',
+        0,
+        'Complimentary guest pass',
+        30,
+        14,
+        'Available',
+        'Guided Hatha & Vinyasa breathwork as the sun dips below the horizon, ending with Tibetan sound bowl resonance meditation.',
+        JSON.stringify([
+          { time: '07:00 AM Sunrise', status: 'Completed', room: null },
+          { time: '05:30 PM Sunset', status: 'Available', room: null }
+        ]),
+        'Yogi Devendra (12 yrs exp)',
+        4.9,
+        'https://images.unsplash.com/photo-1506126613408-eca07ce68773?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'palms_dining',
+        'Dining & Culinary',
+        "The Palms Restaurant (Chef's Tasting Dinner)",
+        'Contemporary coastal gastronomy & tasting menu',
+        'The Palms Main Courtyard',
+        '07:00 PM – 10:30 PM',
+        3500,
+        '5-Course degustation / person',
+        40,
+        38,
+        'Near Capacity (95%)',
+        'Artisan coastal flavors paired with vintage cellar selections, prepared by Michelin-trained Executive Chef with ocean breezes.',
+        JSON.stringify([
+          { time: '07:00 PM', status: 'Booked', room: '115' },
+          { time: '07:30 PM', status: 'Booked', room: '204' },
+          { time: '08:00 PM', status: 'Booked', room: '312' },
+          { time: '08:30 PM', status: 'Booked', room: '109' },
+          { time: '09:00 PM', status: 'Booked', room: '225' },
+          { time: '09:30 PM', status: 'Available', room: null }
+        ]),
+        'Executive Chef Vikram & Sommelier',
+        4.9,
+        'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'beachside_grill',
+        'Dining & Culinary',
+        'Beachside Bar & Grill',
+        'Charcoal grills, seafood & sundowner cocktails',
+        'Private Beach Shore',
+        '11:00 AM – 11:00 PM',
+        1200,
+        'À la carte dining',
+        50,
+        28,
+        'Available',
+        'Catch of the day grilled over mangrove charcoal, fresh tropical ceviche, and signature smoked cocktail concoctions.',
+        JSON.stringify([
+          { time: '01:00 PM Lunch', status: 'Available', room: null },
+          { time: '05:00 PM Sundowner', status: 'Available', room: null },
+          { time: '08:00 PM Dinner', status: 'Available', room: null }
+        ]),
+        'Grillmaster Rohan & Mixology Team',
+        4.7,
+        'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'pool_cabana',
+        'Pool & Leisure',
+        'Infinity Pool Luxury VIP Cabanas',
+        'Secluded daybeds with private butler service',
+        'Cliffside Infinity Pool',
+        '08:00 AM – 07:00 PM',
+        2500,
+        'Full-day VIP Cabana',
+        12,
+        11,
+        'High Demand (92%)',
+        'Plush shaded king daybed, chilled tropical fruit towers, iced Evian facial mists, and dedicated poolside attendant.',
+        JSON.stringify([
+          { time: 'Cabanas #1-#6', status: 'Booked', room: 'Multiple' },
+          { time: 'Cabana #7 (Oceanfront)', status: 'Available', room: null },
+          { time: 'Cabanas #8-#12', status: 'Booked', room: 'Multiple' }
+        ]),
+        'Poolside Butler Crew',
+        4.8,
+        'https://images.unsplash.com/photo-1576013551627-0cc20b96c2a7?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'water_sports',
+        'Activities & Sports',
+        'Beach Water Sports & Jet-Ski Center',
+        'High-speed coastal thrill rides & parasailing',
+        'Beach Activities Pavilion',
+        '08:00 AM – 05:00 PM',
+        2500,
+        '30-minute session',
+        25,
+        16,
+        'Available',
+        'Yamaha WaveRunners, tandem parasailing 300ft above the coastline, and guided sea kayak eco-expeditions.',
+        JSON.stringify([
+          { time: '02:00 PM Jet-Ski', status: 'Available', room: null },
+          { time: '03:00 PM Parasail', status: 'Available', room: null },
+          { time: '04:00 PM Kayak', status: 'Available', room: null }
+        ]),
+        'Certified Coast Guard Instructors',
+        4.6,
+        'https://images.unsplash.com/photo-1563861826100-9cb868fdbe1c?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'scuba_diving',
+        'Activities & Sports',
+        'PADI Scuba Diving & Marine Lagoon',
+        'Coral reef exploration & 2-day certification',
+        'Dive Center Lagoon',
+        '09:00 AM – 04:00 PM',
+        8000,
+        '2-Day Certification Course',
+        10,
+        6,
+        'Available',
+        'Discover colorful sea fans, tropical reef fish, and sea turtles with certified PADI Dive Masters.',
+        JSON.stringify([
+          { time: 'Tomorrow 09:00 AM Discovery Dive', status: 'Available', room: null },
+          { time: 'Tomorrow 01:30 PM Reef Excursion', status: 'Available', room: null }
+        ]),
+        'PADI Master Instructor Marcus',
+        4.9,
+        'https://images.unsplash.com/photo-1544551763-46a013bb70d5?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'personal_fitness',
+        'Fitness & Health',
+        'Private Fitness & Personal Training',
+        '1-on-1 performance coaching & mobility',
+        'Oceanview Gym 2nd Floor',
+        '06:00 AM – 09:00 PM',
+        2000,
+        '60-min private session',
+        14,
+        8,
+        'Available',
+        'Tailored functional training, HIIT conditioning, posture alignment, and recovery mobility coaching.',
+        JSON.stringify([
+          { time: '11:00 AM', status: 'Available', room: null },
+          { time: '02:00 PM', status: 'Available', room: null },
+          { time: '05:00 PM', status: 'Available', room: null }
+        ]),
+        'Certified Strength Coach David',
+        4.7,
+        'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'chef_masterclass',
+        'Activities & Sports',
+        'Executive Chef Culinary Masterclass',
+        'Interactive culinary atelier with spice tasting',
+        'Open Culinary Theatre',
+        'Thu & Sat 11:00 AM – 01:00 PM',
+        3500,
+        'Workshop + Wine Pairing',
+        15,
+        15,
+        'Sold Out (100%)',
+        'Master traditional Goan seafood marinades, hand-rolled pasta, and chocolate tempering alongside Executive Chef.',
+        JSON.stringify([
+          { time: 'Thursday 11:00 AM', status: 'Sold Out', room: 'Fully Booked' }
+        ]),
+        'Executive Chef Vikram',
+        5.0,
+        'https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'kids_club',
+        'Family & Kids',
+        "Little Explorers Kids' Club & Camp",
+        'Creative arts, nature discovery & sandcastle camps',
+        'Children Hub Wing B',
+        '09:00 AM – 06:00 PM',
+        0,
+        'Complimentary for guests',
+        35,
+        18,
+        'Available',
+        'Engaging, secure childcare with sandcastle competitions, organic gardening walks, and kids pottery studio.',
+        JSON.stringify([
+          { time: 'Full Day Care', status: 'Available', room: null }
+        ]),
+        'Licensed Childcare Specialists',
+        4.8,
+        'https://images.unsplash.com/photo-1596464716127-f2a82984de30?auto=format&fit=crop&w=800&q=80'
+      ],
+      [
+        'chauffeur_transfer',
+        'Transport & Concierge',
+        'Luxury Airport Chauffeur Transfer',
+        'Private executive fleet with airport meet-and-greet',
+        'Lobby Porte Cochère',
+        '24 Hours On Demand',
+        2500,
+        'One-way airport transfer',
+        20,
+        12,
+        'Available',
+        'Meet-and-greet airport pickup with cold scented oshibori towels, chilled mineral water, and complimentary Wi-Fi onboard.',
+        JSON.stringify([
+          { time: 'Scheduled Transfers', status: 'Available', room: null }
+        ]),
+        'Executive Chauffeur Fleet',
+        4.9,
+        'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&w=800&q=80'
+      ]
+    ];
+
+    for (const svc of services) {
+      insertService.run(...svc);
+    }
+  }
 }
+
 

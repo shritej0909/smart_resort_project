@@ -43,7 +43,7 @@ export function HeroImage({ variant = 'pool' }: { variant?: 'pool' | 'lobby' | '
     lobby: 'https://images.unsplash.com/photo-1551882547-ff40c63fe5fa?auto=format&fit=crop&w=1920&q=80',
     room: 'https://images.unsplash.com/photo-1618773928121-c32242e63f39?auto=format&fit=crop&w=1920&q=80',
     beach: 'https://images.unsplash.com/photo-1520250497591-112f2f40a3f4?auto=format&fit=crop&w=1920&q=80',
-    spa: 'https://images.unsplash.com/photo-1540555700478-4be289fbec6e?auto=format&fit=crop&w=1920&q=80',
+    spa: 'https://images.unsplash.com/photo-1544161515-4ab6ce6db874?auto=format&fit=crop&w=1920&q=80',
     dining: 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1920&q=80',
   };
 

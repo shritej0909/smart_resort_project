@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { ArrowRight, Eye, EyeOff, ShieldCheck, Sparkles, User, Briefcase, Crown, Star } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Brand from '../components/Brand';
@@ -25,14 +25,24 @@ const features = [
   { icon: Crown, text: 'Personalized Experiences' },
 ];
 
-export default function Login({ onLogin }: { onLogin: (user: PortalUser) => void }) {
-  const [role, setRole] = useState<'guest' | 'manager'>('guest');
+interface LoginProps {
+  onLogin: (user: PortalUser) => void;
+  onBackToLanding?: () => void;
+  initialRole?: 'guest' | 'manager';
+}
+
+export default function Login({ onLogin, onBackToLanding, initialRole = 'guest' }: LoginProps) {
+  const [role, setRole] = useState<'guest' | 'manager'>(initialRole);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [imgIdx, setImgIdx] = useState(0);
+
+  useEffect(() => {
+    if (initialRole) setRole(initialRole);
+  }, [initialRole]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -157,6 +167,25 @@ export default function Login({ onLogin }: { onLogin: (user: PortalUser) => void
           animate={{ opacity: 1 }}
           transition={{ delay: 0.3 }}
         >
+          {onBackToLanding && (
+            <button
+              type="button"
+              className="pill"
+              onClick={onBackToLanding}
+              style={{
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                color: 'var(--green)',
+                fontWeight: 600,
+                border: '1px solid var(--line)',
+                background: 'white'
+              }}
+            >
+              ← Back to Resort Showcase
+            </button>
+          )}
           <span>YOUR RESORT, CONNECTED</span>
           <span className="pill">PS-4 Prototype</span>
         </motion.div>
@@ -210,14 +239,14 @@ export default function Login({ onLogin }: { onLogin: (user: PortalUser) => void
               exit={{ opacity: 0, x: role === 'guest' ? 20 : -20 }}
               transition={{ duration: 0.3 }}
             >
-              <label htmlFor="email">Email address</label>
+              <label htmlFor="email">{role === 'guest' ? 'Email or Guest Login ID' : 'Email address'}</label>
               <input
                 id="email"
-                type="email"
+                type={role === 'guest' ? 'text' : 'email'}
                 autoComplete="username"
                 required
                 maxLength={254}
-                placeholder={role === 'guest' ? 'you@example.com' : 'manager@example.com'}
+                placeholder={role === 'guest' ? 'you@example.com or GUEST-XXXXX' : 'manager@example.com'}
                 value={email}
                 onChange={e => setEmail(e.target.value)}
               />

@@ -3,242 +3,77 @@ import React, { useState, useEffect } from 'react';
 import {
   Wrench,
   AlertTriangle,
-  CheckCircle,
+  CheckCircle2,
   Clock,
-  TrendingDown,
-  Activity,
-  Settings,
-  Zap,
-  Thermometer,
-  Droplets,
-  Calendar,
-  ArrowRight,
-  X,
-  Check,
-  Plus,
+  Sparkles,
   RefreshCw,
-  UserCheck,
-  Sparkles
+  Calendar,
+  ShieldCheck,
+  Check,
+  X,
+  Wind,
+  Droplets,
+  Flame,
+  ArrowUpDown,
+  Layers,
+  Settings,
+  Activity,
+  Calculator,
+  Sliders,
+  ChevronDown,
+  ChevronUp,
+  Info
 } from 'lucide-react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell
-} from 'recharts';
-import { api } from '../services/api';
+import { api, GroupedMaintenanceOverview, GroupedWearService } from '../services/api';
 
-export interface Equipment {
-  id: string;
-  name: string;
-  location: string;
-  type: string;
-  status: string;
-  health: number;
-  last_maintenance?: string;
-  lastMaintenance?: string;
-  next_due?: string;
-  nextDue?: string;
-  failure_probability?: number;
-  failureProbability?: number;
-  issue: string | null;
-  estimated_cost?: string | null;
-  estimatedCost?: string | null;
+function getServiceIcon(iconName: string) {
+  switch (iconName) {
+    case 'Wind':
+      return <Wind className="w-5 h-5 text-sky-600" />;
+    case 'Droplets':
+      return <Droplets className="w-5 h-5 text-cyan-600" />;
+    case 'Flame':
+      return <Flame className="w-5 h-5 text-amber-600" />;
+    case 'ArrowUpDown':
+      return <ArrowUpDown className="w-5 h-5 text-indigo-600" />;
+    default:
+      return <Wrench className="w-5 h-5 text-purple-600" />;
+  }
 }
-
-export interface MaintenanceTask {
-  id: string;
-  equipment_id?: string;
-  equipment_name?: string;
-  equipment?: string;
-  task: string;
-  priority: string;
-  technician?: string;
-  scheduled_date?: string;
-  scheduled?: string;
-  duration: string;
-  status?: string;
-  estimated_cost?: string;
-  notes?: string;
-}
-
-export interface MaintenanceOverview {
-  equipment: Equipment[];
-  tasks: MaintenanceTask[];
-  healthDistribution: { name: string; value: number; count: number; color: string }[];
-  maintenanceHistory: { month: string; scheduled: number; emergency: number; cost: number }[];
-  sensorReadings: { time: string; vibration: number; temperature: number; pressure: number }[];
-  criticalCount: number;
-  scheduledCount: number;
-  overallHealthPct: number;
-}
-
-const fallbackEquipment: Equipment[] = [
-  {
-    id: 'eq-1',
-    name: 'Main Pool Pump',
-    location: 'Pool Area',
-    type: 'Pump',
-    status: 'Critical',
-    health: 23,
-    last_maintenance: '2026-08-15',
-    next_due: '2026-09-28',
-    failure_probability: 78,
-    issue: 'Vibration levels critical - bearing wear detected',
-    estimated_cost: '₹1.85L'
-  },
-  {
-    id: 'eq-2',
-    name: 'HVAC Unit - Block A',
-    location: 'Block A Rooftop',
-    type: 'HVAC',
-    status: 'Warning',
-    health: 58,
-    last_maintenance: '2026-08-20',
-    next_due: '2026-10-05',
-    failure_probability: 42,
-    issue: 'Filter replacement needed, efficiency dropping',
-    estimated_cost: '₹45K'
-  },
-  {
-    id: 'eq-3',
-    name: 'Generator #2',
-    location: 'Power Room',
-    type: 'Generator',
-    status: 'Healthy',
-    health: 92,
-    last_maintenance: '2026-09-01',
-    next_due: '2026-12-01',
-    failure_probability: 8,
-    issue: null,
-    estimated_cost: null
-  },
-  {
-    id: 'eq-4',
-    name: 'Water Treatment Plant',
-    location: 'Utility Area',
-    type: 'Treatment',
-    status: 'Warning',
-    health: 67,
-    last_maintenance: '2026-08-25',
-    next_due: '2026-10-10',
-    failure_probability: 35,
-    issue: 'Chemical balance sensors need calibration',
-    estimated_cost: '₹28K'
-  },
-  {
-    id: 'eq-5',
-    name: 'Elevator - Building C',
-    location: 'Building C',
-    type: 'Elevator',
-    status: 'Healthy',
-    health: 95,
-    last_maintenance: '2026-09-10',
-    next_due: '2026-11-10',
-    failure_probability: 5,
-    issue: null,
-    estimated_cost: null
-  },
-  {
-    id: 'eq-6',
-    name: 'Kitchen Exhaust System',
-    location: 'Main Kitchen',
-    type: 'Ventilation',
-    status: 'Critical',
-    health: 34,
-    last_maintenance: '2026-08-10',
-    next_due: '2026-09-27',
-    failure_probability: 85,
-    issue: 'Duct buildup exceeds safe levels - fire hazard',
-    estimated_cost: '₹92K'
-  },
-];
-
-const fallbackTasks: MaintenanceTask[] = [
-  { id: 'task-1', equipment_name: 'Pool Pump', task: 'Bearing Replacement', priority: 'Critical', scheduled_date: 'Today 2:00 PM', duration: '4 hours', technician: 'Apex ElectroMech' },
-  { id: 'task-2', equipment_name: 'Kitchen Exhaust', task: 'Deep Cleaning', priority: 'Critical', scheduled_date: 'Tomorrow 9:00 AM', duration: '3 hours', technician: 'SafeFire Services' },
-  { id: 'task-3', equipment_name: 'HVAC Unit A', task: 'Filter Replacement', priority: 'Medium', scheduled_date: '28 Sept 2026', duration: '1 hour', technician: 'Internal Team' },
-  { id: 'task-4', equipment_name: 'Water Treatment', task: 'Sensor Calibration', priority: 'Low', scheduled_date: '30 Sept 2026', duration: '2 hours', technician: 'AquaPure' },
-];
 
 export default function PredictiveMaintenance() {
-  const [data, setData] = useState<MaintenanceOverview | null>(null);
+  const [data, setData] = useState<GroupedMaintenanceOverview | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [evaluating, setEvaluating] = useState(false);
+  const [performingServiceId, setPerformingServiceId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
 
-  // Modals state
-  const [repairTarget, setRepairTarget] = useState<Equipment | null>(null);
-  const [detailsTarget, setDetailsTarget] = useState<Equipment | null>(null);
-  const [rescheduleTask, setRescheduleTask] = useState<MaintenanceTask | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
+  // Simulator state
+  const [showSimulator, setShowSimulator] = useState(false);
+  const [simHighDays, setSimHighDays] = useState(45);
+  const [simNeutralDays, setSimNeutralDays] = useState(15);
+  const [simLowDays, setSimLowDays] = useState(0);
 
-  // Schedule repair form state
-  const [repairForm, setRepairForm] = useState({
-    task: '',
-    priority: 'Critical',
-    technician: 'Emergency Engineering Team',
-    scheduledDate: 'Tomorrow 9:00 AM',
-    duration: '3 hours',
-    estimatedCost: '₹1.85L',
-    notes: ''
-  });
+  // Perform modal state
+  const [serviceToPerform, setServiceToPerform] = useState<GroupedWearService | null>(null);
+  const [performNotes, setPerformNotes] = useState('');
+  const [performedBy, setPerformedBy] = useState('Chief Engineer & Technical Unit');
 
-  // Reschedule form state
-  const [newScheduleDate, setNewScheduleDate] = useState('');
-
-  // Add equipment form state
-  const [newEquipment, setNewEquipment] = useState({
-    name: '',
-    location: '',
-    type: 'HVAC',
-    health: 85,
-    status: 'Healthy',
-    failureProbability: 15,
-    estimatedCost: '₹30K'
-  });
+  const [expandedMathId, setExpandedMathId] = useState<string | null>(null);
 
   const fetchData = async () => {
     try {
-      const res = await api<MaintenanceOverview>('/maintenance/overview');
+      const res = await api<GroupedMaintenanceOverview>('/maintenance/overview');
       setData(res);
-    } catch {
-      // Fallback local initial state if offline
-      setData({
-        equipment: fallbackEquipment,
-        tasks: fallbackTasks,
-        healthDistribution: [
-          { name: 'Healthy', value: 65, count: 2, color: '#10b981' },
-          { name: 'Warning', value: 25, count: 2, color: '#f59e0b' },
-          { name: 'Critical', value: 10, count: 2, color: '#ef4444' },
-        ],
-        maintenanceHistory: [
-          { month: 'Aug', scheduled: 12, emergency: 3, cost: 2.4 },
-          { month: 'Sep', scheduled: 15, emergency: 2, cost: 1.8 },
-          { month: 'Oct', scheduled: 10, emergency: 5, cost: 3.2 },
-          { month: 'Nov', scheduled: 14, emergency: 1, cost: 1.5 },
-          { month: 'Dec', scheduled: 11, emergency: 4, cost: 2.8 },
-          { month: 'Jan', scheduled: 16, emergency: 2, cost: 1.9 },
-        ],
-        sensorReadings: [
-          { time: '00:00', vibration: 2.1, temperature: 45, pressure: 12 },
-          { time: '04:00', vibration: 2.3, temperature: 47, pressure: 13 },
-          { time: '08:00', vibration: 2.8, temperature: 52, pressure: 15 },
-          { time: '12:00', vibration: 3.5, temperature: 58, pressure: 18 },
-          { time: '16:00', vibration: 4.2, temperature: 65, pressure: 22 },
-          { time: '20:00', vibration: 4.8, temperature: 68, pressure: 24 },
-        ],
-        criticalCount: 2,
-        scheduledCount: 4,
-        overallHealthPct: 78
-      });
+      if (res.sessionMix) {
+        setSimHighDays(res.sessionMix.highDays);
+        setSimNeutralDays(res.sessionMix.neutralDays);
+        setSimLowDays(res.sessionMix.lowDays);
+      }
+      setError('');
+    } catch (err: any) {
+      setError(err?.message || 'Could not connect to maintenance predictive engine.');
     } finally {
       setLoading(false);
     }
@@ -248,872 +83,711 @@ export default function PredictiveMaintenance() {
     fetchData();
   }, []);
 
-  const openScheduleModal = (equipment: Equipment) => {
-    setRepairTarget(equipment);
-    setRepairForm({
-      task: equipment.name.includes('Pump') ? 'Bearing Replacement & Vibration Alignment'
-        : equipment.name.includes('Exhaust') ? 'Deep Duct Degreasing & Filter Replacement'
-        : equipment.name.includes('HVAC') ? 'Compressor Servicing & Coil Clean'
-        : `${equipment.name} Overhaul`,
-      priority: equipment.status === 'Critical' ? 'Critical' : 'High',
-      technician: equipment.type === 'Pump' ? 'Apex ElectroMech Services'
-        : equipment.type === 'Ventilation' ? 'SafeFire Duct Systems'
-        : 'In-House Senior Engineering',
-      scheduledDate: 'Tomorrow 9:00 AM',
-      duration: '3 hours',
-      estimatedCost: equipment.estimated_cost || equipment.estimatedCost || '₹1.2L',
-      notes: equipment.issue || 'Preventative component overhaul to avert breakdown.'
-    });
+  const showToastMsg = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 4500);
   };
 
-  const handleConfirmSchedule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!repairTarget) return;
-
-    setBusy(true);
-    setError('');
+  // Switch grouped scenario
+  const handleScenarioSwitch = async (scenario: 'scenario-60' | 'scenario-90' | 'scenario-offpeak' | 'custom') => {
+    setEvaluating(true);
     try {
-      const res = await api<{ ok: boolean; message: string }>('/maintenance/schedule', 'POST', {
-        equipmentId: repairTarget.id,
-        task: repairForm.task,
-        priority: repairForm.priority,
-        technician: repairForm.technician,
-        scheduledDate: repairForm.scheduledDate,
-        duration: repairForm.duration,
-        estimatedCost: repairForm.estimatedCost,
-        notes: repairForm.notes
+      const res = await api<GroupedMaintenanceOverview & { ok: boolean; message: string }>('/maintenance/scenario', 'POST', {
+        scenario,
+        highDays: scenario === 'custom' ? simHighDays : undefined,
+        neutralDays: scenario === 'custom' ? simNeutralDays : undefined,
+        lowDays: scenario === 'custom' ? simLowDays : undefined
       });
-      setToast(res.message || `Repair scheduled successfully for ${repairTarget.name}!`);
-      setRepairTarget(null);
-      await fetchData();
-    } catch (err) {
-      setError((err as Error).message);
+      setData(res);
+      showToastMsg(`Evaluated ${res.activeScenarioTitle}!`);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to switch scenario.');
     } finally {
-      setBusy(false);
+      setEvaluating(false);
     }
   };
 
-  const handleConfirmReschedule = async (e: React.FormEvent) => {
+  // Custom simulator submit
+  const handleApplyCustomSimulator = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!rescheduleTask || !newScheduleDate) return;
-
-    setBusy(true);
+    setEvaluating(true);
     try {
-      await api(`/maintenance/tasks/${rescheduleTask.id}`, 'PATCH', {
-        scheduled_date: newScheduleDate
+      const res = await api<GroupedMaintenanceOverview & { ok: boolean; message: string }>('/maintenance/scenario', 'POST', {
+        scenario: 'custom',
+        highDays: Number(simHighDays),
+        neutralDays: Number(simNeutralDays),
+        lowDays: Number(simLowDays)
       });
-      setToast(`Task "${rescheduleTask.task}" rescheduled to ${newScheduleDate}.`);
-      setRescheduleTask(null);
-      await fetchData();
-    } catch (err) {
-      setError((err as Error).message);
+      setData(res);
+      showToastMsg(`Custom operational session mix applied (${simHighDays + simNeutralDays + simLowDays} days total)!`);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to apply custom session mix.');
     } finally {
-      setBusy(false);
+      setEvaluating(false);
     }
   };
 
-  const handleAddEquipment = async (e: React.FormEvent) => {
+  // Perform maintenance & reset cumulative fatigue
+  const handleConfirmPerform = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newEquipment.name) return;
-
-    setBusy(true);
+    if (!serviceToPerform) return;
+    setPerformingServiceId(serviceToPerform.id);
     try {
-      await api('/maintenance/equipment', 'POST', newEquipment);
-      setToast(`Equipment "${newEquipment.name}" added successfully.`);
-      setShowAddModal(false);
-      setNewEquipment({ name: '', location: '', type: 'HVAC', health: 85, status: 'Healthy', failureProbability: 15, estimatedCost: '₹30K' });
-      await fetchData();
-    } catch (err) {
-      setError((err as Error).message);
+      const res = await api<{ ok: boolean; message: string; overview: GroupedMaintenanceOverview }>('/maintenance/perform', 'POST', {
+        serviceId: serviceToPerform.id,
+        notes: performNotes,
+        performedBy: performedBy.trim() || 'Chief Engineer & Technical Unit'
+      });
+      if (res && res.overview) {
+        setData(res.overview);
+      } else {
+        await fetchData();
+      }
+      showToastMsg(`Certified maintenance completed for ${serviceToPerform.name}. Cumulative fatigue reset to 0.0 units!`);
+      setServiceToPerform(null);
+      setPerformNotes('');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to record maintenance completion.');
     } finally {
-      setBusy(false);
+      setPerformingServiceId(null);
     }
   };
 
-  const getStatusStyle = (status: string) => {
-    switch (status) {
-      case 'Critical': return 'bg-red-100 text-red-700 border-red-200';
-      case 'Warning': return 'bg-orange-100 text-orange-700 border-orange-200';
-      case 'Repair Scheduled': return 'bg-blue-100 text-blue-700 border-blue-200';
-      case 'Healthy': return 'bg-green-100 text-green-700 border-green-200';
-      default: return 'bg-slate-100 text-slate-600 border-slate-200';
-    }
-  };
+  const currentServices = data?.services || [];
+  const sessionMix = data?.sessionMix || { totalDays: 60, highDays: 45, neutralDays: 10, lowDays: 5, highPct: 75, neutralPct: 17, lowPct: 8 };
 
-  const getHealthColor = (health: number) => {
-    if (health >= 80) return 'text-green-600';
-    if (health >= 50) return 'text-orange-600';
-    return 'text-red-600';
-  };
-
-  const currentEquipment = data?.equipment || fallbackEquipment;
-  const currentTasks = data?.tasks || fallbackTasks;
-  const criticalItems = currentEquipment.filter(e => e.status === 'Critical');
-  const criticalCount = data ? data.criticalCount : criticalItems.length;
-  const scheduledCount = data ? data.scheduledCount : currentTasks.length;
-  const healthDistribution = data?.healthDistribution || [
-    { name: 'Healthy', value: 65, color: '#10b981' },
-    { name: 'Warning', value: 25, color: '#f59e0b' },
-    { name: 'Critical', value: 10, color: '#ef4444' },
-  ];
-  const maintenanceHistory = data?.maintenanceHistory || [
-    { month: 'Aug', scheduled: 12, emergency: 3, cost: 2.4 },
-    { month: 'Sep', scheduled: 15, emergency: 2, cost: 1.8 },
-    { month: 'Oct', scheduled: 10, emergency: 5, cost: 3.2 },
-    { month: 'Nov', scheduled: 14, emergency: 1, cost: 1.5 },
-    { month: 'Dec', scheduled: 11, emergency: 4, cost: 2.8 },
-    { month: 'Jan', scheduled: 16, emergency: 2, cost: 1.9 },
-  ];
-  const sensorReadings = data?.sensorReadings || [
-    { time: '00:00', vibration: 2.1, temperature: 45, pressure: 12 },
-    { time: '04:00', vibration: 2.3, temperature: 47, pressure: 13 },
-    { time: '08:00', vibration: 2.8, temperature: 52, pressure: 15 },
-    { time: '12:00', vibration: 3.5, temperature: 58, pressure: 18 },
-    { time: '16:00', vibration: 4.2, temperature: 65, pressure: 22 },
-    { time: '20:00', vibration: 4.8, temperature: 68, pressure: 24 },
-  ];
+  if (loading && !data) {
+    return (
+      <div className="flex items-center justify-center min-h-[500px]">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-8 h-8 text-indigo-600 animate-spin" />
+          <p className="text-slate-600 font-medium">Computing cumulative fatigue index & degradation model...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <motion.div className="space-y-6" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-      {/* Toast Banner */}
+    <div className="space-y-6 max-w-7xl mx-auto px-4 py-4">
+      {/* Toast Alert */}
       <AnimatePresence>
         {toast && (
           <motion.div
-            className="success"
-            role="status"
-            initial={{ opacity: 0, y: -10 }}
+            initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-3 border border-indigo-500/40"
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Check size={18} />
-              <span>{toast}</span>
-            </div>
-            <button className="icon-btn" onClick={() => setToast('')} style={{ color: 'inherit' }}>
-              <X size={16} />
-            </button>
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-sm font-semibold">{toast}</span>
           </motion.div>
         )}
       </AnimatePresence>
 
+      {/* Error Alert */}
       {error && (
-        <motion.div className="error" role="alert" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-          {error}
-        </motion.div>
-      )}
-
-      {/* Header Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 bg-red-50 rounded-xl">
-              <AlertTriangle className="w-5 h-5 text-red-600" />
-            </div>
-            <span className="text-sm text-slate-500 font-medium">Critical Alerts</span>
+        <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl flex items-center justify-between text-sm">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
+            <span>{error}</span>
           </div>
-          <div className="text-3xl font-bold text-slate-900">{criticalCount}</div>
-          <div className="text-sm text-red-600 mt-1 font-medium">
-            {criticalCount > 0 ? 'Requires immediate action' : 'All systems stabilized'}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 bg-orange-50 rounded-xl">
-              <Clock className="w-5 h-5 text-orange-600" />
-            </div>
-            <span className="text-sm text-slate-500 font-medium">Scheduled Work Orders</span>
-          </div>
-          <div className="text-3xl font-bold text-slate-900">{scheduledCount}</div>
-          <div className="text-sm text-slate-500 mt-1">Active tasks scheduled</div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 bg-green-50 rounded-xl">
-              <CheckCircle className="w-5 h-5 text-green-600" />
-            </div>
-            <span className="text-sm text-slate-500 font-medium">Average Equipment Health</span>
-          </div>
-          <div className="text-3xl font-bold text-slate-900">{data?.overallHealthPct || 78}%</div>
-          <div className="text-sm text-green-600 mt-1 font-medium">+8% following predictive intervention</div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 bg-purple-50 rounded-xl">
-              <TrendingDown className="w-5 h-5 text-purple-600" />
-            </div>
-            <span className="text-sm text-slate-500 font-medium">Downtime Reduction</span>
-          </div>
-          <div className="text-3xl font-bold text-slate-900">42%</div>
-          <div className="text-sm text-green-600 mt-1 font-medium">Gemini ML predictive model</div>
-        </div>
-      </div>
-
-      {/* Critical Alerts Banner with Interactive Repair Buttons */}
-      {criticalItems.length > 0 ? (
-        <div className="bg-gradient-to-r from-red-50 to-orange-50 rounded-2xl p-6 border border-red-200 shadow-sm">
-          <div className="flex items-start gap-4">
-            <div className="p-3 bg-red-100 rounded-xl flex-shrink-0">
-              <AlertTriangle className="w-6 h-6 text-red-600" />
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-lg font-bold text-slate-900">Critical Equipment Requiring Immediate Attention</h3>
-                <span className="px-2.5 py-1 bg-red-100 text-red-700 text-xs font-semibold rounded-full">
-                  {criticalItems.length} Urgent Items
-                </span>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {criticalItems.map(equipment => {
-                  const failureRisk = equipment.failure_probability || equipment.failureProbability || 75;
-                  const estCost = equipment.estimated_cost || equipment.estimatedCost || '₹1.0L';
-
-                  return (
-                    <motion.div
-                      key={equipment.id}
-                      className="bg-white rounded-xl p-4 border border-red-100 shadow-sm hover:shadow-md transition-shadow"
-                      whileHover={{ y: -2 }}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-bold text-slate-900">{equipment.name}</span>
-                        <span className="text-xs font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-md border border-red-100">
-                          {failureRisk}% failure risk
-                        </span>
-                      </div>
-                      <p className="text-sm text-slate-600 mb-3">{equipment.issue}</p>
-                      <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                        <span className="text-xs text-slate-500 font-medium">Est. Cost: <b>{estCost}</b></span>
-                        <button
-                          className="schedule-repair-btn text-sm font-semibold text-white bg-red-600 hover:bg-red-700 px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors shadow-sm"
-                          onClick={() => openScheduleModal(equipment)}
-                        >
-                          Schedule Repair <ArrowRight className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="bg-gradient-to-r from-emerald-50 to-teal-50 rounded-2xl p-6 border border-emerald-200 shadow-sm flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-3 bg-emerald-100 rounded-xl">
-              <CheckCircle className="w-6 h-6 text-emerald-600" />
-            </div>
-            <div>
-              <h3 className="font-bold text-slate-900">All Critical Equipment Repairs Have Been Scheduled</h3>
-              <p className="text-sm text-slate-600">Work orders dispatched. Vibration, thermal, and sensor readings within managed thresholds.</p>
-            </div>
-          </div>
-          <button
-            className="secondary"
-            onClick={fetchData}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-          >
-            <RefreshCw size={15} /> Refresh Diagnostics
+          <button onClick={() => setError('')} className="text-red-500 hover:text-red-700">
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Equipment Health Overview and Cost Trend */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <h3 className="text-lg font-bold text-slate-900 mb-1">Equipment Health Distribution</h3>
-          <p className="text-sm text-slate-500 mb-4">Overall live status breakdown</p>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie
-                data={healthDistribution}
-                cx="50%"
-                cy="50%"
-                innerRadius={60}
-                outerRadius={80}
-                paddingAngle={5}
-                dataKey="value"
-              >
-                {healthDistribution.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip formatter={(value: number) => [`${value}% of total systems`, 'Health Status']} />
-            </PieChart>
-          </ResponsiveContainer>
-          <div className="space-y-2 mt-4">
-            {healthDistribution.map((item) => (
-              <div key={item.name} className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }}></div>
-                  <span className="text-sm text-slate-600">{item.name}</span>
-                </div>
-                <span className="text-sm font-semibold text-slate-900">{item.value}%</span>
-              </div>
-            ))}
-          </div>
-        </div>
+      {/* Main Header with Mathematical Degradation Overview */}
+      <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950 text-white rounded-3xl p-6 sm:p-8 shadow-xl border border-slate-800 relative overflow-hidden">
+        <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-indigo-500/10 to-transparent pointer-events-none" />
 
-        <div className="lg:col-span-2 bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-lg font-bold text-slate-900">Maintenance Cost Trend</h3>
-              <p className="text-sm text-slate-500">Monthly breakdown in lakhs (INR)</p>
-            </div>
-            <span className="pill text-xs">Live Logged Costs</span>
-          </div>
-          <ResponsiveContainer width="100%" height={240}>
-            <LineChart data={maintenanceHistory}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="month" stroke="#64748b" fontSize={12} />
-              <YAxis stroke="#64748b" fontSize={12} unit="L" />
-              <Tooltip formatter={(val: number) => [`₹${val} Lakhs`, 'Monthly Spend']} />
-              <Line type="monotone" dataKey="cost" stroke="#8b5cf6" strokeWidth={3} dot={{ fill: '#8b5cf6', strokeWidth: 2, r: 5 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Sensor Readings - Pool Pump */}
-      <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-2xl p-6 border border-blue-200 shadow-sm">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 relative z-10">
           <div>
-            <h3 className="text-lg font-bold text-slate-900">Live Sensor Monitoring &bull; Main Pool Pump</h3>
-            <p className="text-sm text-slate-600">Telemetry streams from IoT acoustic, vibration, and thermal probes</p>
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 text-xs font-semibold uppercase tracking-wider mb-3">
+              <Calculator className="w-3.5 h-3.5 text-indigo-400" />
+              Cumulative Fatigue & Session-Grouped Predictive Model
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+              Predictive Equipment Fatigue & Wear Analysis
+            </h1>
+            <p className="text-slate-300 text-sm mt-1 max-w-2xl leading-relaxed">
+              Equipment degradation is non-linear and governed by cumulative historical stress sessions. High-occupancy days burn fatigue capacity rapidly, while neutral/low days dilute wear. When accumulated fatigue crosses the critical threshold (<code className="text-indigo-300">W_cum &ge; W_threshold</code>), preventative maintenance is triggered.
+            </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Activity className="w-5 h-5 text-red-500 animate-pulse" />
-            <span className="text-sm font-semibold text-red-600">
-              {criticalCount > 0 ? 'Anomalies Detected (Bearing)' : 'Operating Normally'}
+
+          <button
+            onClick={() => setShowSimulator(!showSimulator)}
+            className="self-start lg:self-center px-4 py-2.5 rounded-2xl bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-xs font-bold text-white flex items-center gap-2 transition-all shadow-lg"
+          >
+            <Sliders className="w-4 h-4 text-indigo-300" />
+            <span>{showSimulator ? 'Hide Session Simulator' : 'Custom Session Mix Simulator'}</span>
+          </button>
+        </div>
+
+        {/* Grouped Operational Scenario Selector Tabs */}
+        <div className="mt-8 pt-6 border-t border-slate-800/80">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              Select Grouped Operational Scenario
+            </span>
+            <span className="text-xs text-slate-400">
+              Evaluated Window: <b className="text-white">{sessionMix.totalDays} Total Days</b>
             </span>
           </div>
-        </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="bg-white rounded-xl p-4 border border-blue-100 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-5 h-5 text-orange-500" />
-              <span className="text-sm text-slate-500 font-medium">Vibration Speed</span>
-            </div>
-            <div className="text-2xl font-bold text-red-600">4.8 mm/s</div>
-            <div className="text-xs text-red-600 mt-1 font-medium">Threshold: 3.0 mm/s (Bearing friction)</div>
-          </div>
-
-          <div className="bg-white rounded-xl p-4 border border-blue-100 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Thermometer className="w-5 h-5 text-red-500" />
-              <span className="text-sm text-slate-500 font-medium">Casing Temperature</span>
-            </div>
-            <div className="text-2xl font-bold text-orange-600">68°C</div>
-            <div className="text-xs text-orange-600 mt-1 font-medium">Threshold: 70°C (Warning zone)</div>
-          </div>
-
-          <div className="bg-white rounded-xl p-4 border border-blue-100 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Droplets className="w-5 h-5 text-blue-500" />
-              <span className="text-sm text-slate-500 font-medium">Line Hydraulic Pressure</span>
-            </div>
-            <div className="text-2xl font-bold text-slate-900">24 PSI</div>
-            <div className="text-xs text-green-600 mt-1 font-medium">Normal pressure range</div>
-          </div>
-        </div>
-
-        <ResponsiveContainer width="100%" height={160}>
-          <LineChart data={sensorReadings}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-            <XAxis dataKey="time" stroke="#64748b" fontSize={12} />
-            <YAxis stroke="#64748b" fontSize={12} />
-            <Tooltip />
-            <Line type="monotone" dataKey="vibration" name="Vibration (mm/s)" stroke="#f97316" strokeWidth={2.5} dot={false} />
-            <Line type="monotone" dataKey="temperature" name="Temp (°C)" stroke="#ef4444" strokeWidth={2.5} dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Equipment List Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
-        <div className="p-6 border-b border-slate-200 flex items-center justify-between flex-wrap gap-4">
-          <div>
-            <h3 className="text-lg font-bold text-slate-900">All Monitored Equipment</h3>
-            <p className="text-sm text-slate-500">Continuous telemetry and predictive health index</p>
-          </div>
-          <div className="flex items-center gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* Scenario 60 */}
             <button
-              className="secondary flex items-center gap-1.5"
-              onClick={fetchData}
-              disabled={loading}
+              type="button"
+              onClick={() => handleScenarioSwitch('scenario-60')}
+              disabled={evaluating}
+              className={`p-4 rounded-2xl text-left border transition-all ${
+                data?.activeScenario === 'scenario-60'
+                  ? 'bg-gradient-to-br from-indigo-900/80 to-slate-900 border-indigo-400 ring-2 ring-indigo-400/40 shadow-lg'
+                  : 'bg-slate-900/60 border-slate-800 hover:bg-slate-800/70'
+              }`}
             >
-              <RefreshCw size={15} /> Refresh Status
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-extrabold text-white">Scenario 1 &bull; 60-Day Window</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800/60">
+                  45 High / 15 Low
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 leading-snug">
+                Heavy occupancy stress. Central AC hits its 50-unit threshold and triggers maintenance at <b className="text-red-400">Day 60</b>.
+              </p>
             </button>
+
+            {/* Scenario 90 */}
             <button
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 transition-colors text-sm font-semibold shadow-sm"
-              onClick={() => setShowAddModal(true)}
+              type="button"
+              onClick={() => handleScenarioSwitch('scenario-90')}
+              disabled={evaluating}
+              className={`p-4 rounded-2xl text-left border transition-all ${
+                data?.activeScenario === 'scenario-90'
+                  ? 'bg-gradient-to-br from-indigo-900/80 to-slate-900 border-indigo-400 ring-2 ring-indigo-400/40 shadow-lg'
+                  : 'bg-slate-900/60 border-slate-800 hover:bg-slate-800/70'
+              }`}
             >
-              <Plus className="w-4 h-4" />
-              <span>Add Equipment</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-extrabold text-white">Scenario 2 &bull; 90-Day Window</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-950 text-blue-400 border border-blue-800/60">
+                  45 High / 45 Low
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 leading-snug">
+                Equal neutral dilution. The same 50 units stretches over 90 days, triggering service at <b className="text-blue-400">Day 90</b>.
+              </p>
+            </button>
+
+            {/* Scenario Offpeak */}
+            <button
+              type="button"
+              onClick={() => handleScenarioSwitch('scenario-offpeak')}
+              disabled={evaluating}
+              className={`p-4 rounded-2xl text-left border transition-all ${
+                data?.activeScenario === 'scenario-offpeak'
+                  ? 'bg-gradient-to-br from-indigo-900/80 to-slate-900 border-indigo-400 ring-2 ring-indigo-400/40 shadow-lg'
+                  : 'bg-slate-900/60 border-slate-800 hover:bg-slate-800/70'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-extrabold text-white">Scenario 3 &bull; Conservation</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/60">
+                  15 High / 60 Low
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 leading-snug">
+                Light off-peak usage. Daily fatigue drops to ~0.35/day, extending AC cycle to <b className="text-emerald-400">140+ Days</b>.
+              </p>
             </button>
           </div>
-        </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-slate-50">
-              <tr>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Equipment</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Location</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Health</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Failure Risk</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Next Due</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {currentEquipment.map((equipment) => {
-                const failureRisk = equipment.failure_probability || equipment.failureProbability || 0;
-                const nextDate = equipment.next_due || equipment.nextDue || '2026-10-15';
+          {/* Observed Operational Session Distribution Bar */}
+          <div className="mt-5 p-3.5 bg-slate-900/90 rounded-2xl border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">Session Breakdown:</span>
+              <div className="flex items-center gap-1.5 font-bold">
+                <span className="text-red-400">{sessionMix.highDays} High ({sessionMix.highPct}%)</span>
+                <span className="text-slate-500">&bull;</span>
+                <span className="text-blue-400">{sessionMix.neutralDays} Neutral ({sessionMix.neutralPct}%)</span>
+                <span className="text-slate-500">&bull;</span>
+                <span className="text-emerald-400">{sessionMix.lowDays} Low ({sessionMix.lowPct}%)</span>
+              </div>
+            </div>
 
-                return (
-                  <tr key={equipment.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4">
-                      <div>
-                        <div className="font-semibold text-slate-900">{equipment.name}</div>
-                        <div className="text-sm text-slate-500">{equipment.type}</div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-slate-600">{equipment.location}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-16 h-2 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${
-                              equipment.health >= 80 ? 'bg-green-500' :
-                              equipment.health >= 50 ? 'bg-orange-500' : 'bg-red-500'
-                            }`}
-                            style={{ width: `${equipment.health}%` }}
-                          ></div>
-                        </div>
-                        <span className={`text-sm font-semibold ${getHealthColor(equipment.health)}`}>
-                          {equipment.health}%
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusStyle(equipment.status)}`}>
-                        {equipment.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`text-sm font-semibold ${
-                        failureRisk >= 50 ? 'text-red-600' :
-                        failureRisk >= 25 ? 'text-orange-600' : 'text-green-600'
-                      }`}>
-                        {failureRisk}%
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2 text-sm text-slate-600">
-                        <Calendar className="w-4 h-4" />
-                        {nextDate}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-3">
-                        <button
-                          className="text-emerald-700 hover:text-emerald-800 text-sm font-semibold hover:underline"
-                          onClick={() => setDetailsTarget(equipment)}
-                        >
-                          View Details
-                        </button>
-                        {equipment.status !== 'Healthy' && (
-                          <button
-                            className="text-xs bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 font-semibold px-2.5 py-1 rounded-md transition-colors"
-                            onClick={() => openScheduleModal(equipment)}
-                          >
-                            Schedule Repair
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+            <div className="flex items-center gap-4 text-slate-400">
+              <div>Average Fleet Wear: <b className="text-white">{data?.stats?.averageWearIndex}%</b></div>
+              <div>&bull;</div>
+              <button onClick={fetchData} className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-semibold">
+                <RefreshCw className="w-3.5 h-3.5" /> Re-sync Telemetry
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Upcoming Maintenance Schedule */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-lg font-bold text-slate-900">Upcoming Maintenance Work Orders</h3>
-            <p className="text-sm text-slate-500">Scheduled repairs, technician dispatches, and compliance overhauls</p>
-          </div>
-          <span className="pill">{currentTasks.length} Work Orders</span>
-        </div>
-
-        <div className="space-y-3">
-          {currentTasks.map((task) => {
-            const taskEquip = task.equipment_name || task.equipment || 'Equipment';
-            const scheduledTime = task.scheduled_date || task.scheduled || 'Scheduled';
-
-            return (
-              <div key={task.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100/70 transition-colors">
-                <div className="flex items-center gap-4">
-                  <div className={`w-1.5 h-12 rounded-full ${
-                    task.priority === 'Critical' ? 'bg-red-500' :
-                    task.priority === 'Medium' || task.priority === 'High' ? 'bg-orange-500' : 'bg-green-500'
-                  }`}></div>
+      {/* Interactive Custom Session Simulator Drawer */}
+      <AnimatePresence>
+        {showSimulator && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="bg-white rounded-3xl border border-indigo-200 shadow-xl p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl">
+                    <Sliders className="w-5 h-5" />
+                  </div>
                   <div>
-                    <div className="font-semibold text-slate-900">{taskEquip} &bull; {task.task}</div>
-                    <div className="text-sm text-slate-500 flex items-center gap-2 mt-0.5">
-                      <Clock size={13} />
-                      <span>{scheduledTime} &bull; Est. Duration: {task.duration}</span>
-                      {task.technician && <span className="text-slate-700 font-medium">&bull; Tech: {task.technician}</span>}
-                    </div>
+                    <h3 className="font-bold text-slate-900 text-base">Custom Session Mix Simulator</h3>
+                    <p className="text-xs text-slate-500">Tune the number of High, Neutral, and Low demand days to observe real-time fatigue curves</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                    task.priority === 'Critical' ? 'bg-red-100 text-red-700' :
-                    task.priority === 'Medium' || task.priority === 'High' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'
-                  }`}>
-                    {task.priority}
-                  </span>
-                  <button
-                    className="text-sm font-semibold text-purple-700 hover:text-purple-800 hover:underline px-2 py-1"
-                    onClick={() => { setRescheduleTask(task); setNewScheduleDate(scheduledTime); }}
-                  >
-                    Reschedule
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* SCHEDULE REPAIR MODAL */}
-      <AnimatePresence>
-        {repairTarget && (
-          <div className="modal-overlay" onClick={() => setRepairTarget(null)}>
-            <motion.div
-              className="modal-content"
-              onClick={e => e.stopPropagation()}
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              style={{ maxWidth: '580px' }}
-            >
-              <div className="guest-modal-header">
-                <div>
-                  <h2 style={{ fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Wrench className="text-red-600" size={20} />
-                    Schedule Predictive Repair
-                  </h2>
-                  <p className="muted">Create work order & dispatch technical repair team</p>
-                </div>
-                <button className="icon-btn close-modal-btn" onClick={() => setRepairTarget(null)}>
-                  <X size={20} />
+                <button onClick={() => setShowSimulator(false)} className="text-slate-400 hover:text-slate-600">
+                  <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <form onSubmit={handleConfirmSchedule} className="p-6 space-y-4">
-                {/* Equipment summary card */}
-                <div className="bg-red-50/70 border border-red-100 rounded-xl p-3.5 flex items-center justify-between">
-                  <div>
-                    <b className="text-slate-900 block">{repairTarget.name}</b>
-                    <small className="text-slate-600">{repairTarget.location} &bull; {repairTarget.type}</small>
+              <form onSubmit={handleApplyCustomSimulator} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* High Days Slider */}
+                  <div className="bg-red-50/70 p-4 rounded-2xl border border-red-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold text-red-900 flex items-center gap-1">
+                        🔥 High Demand Sessions (w = 1.00)
+                      </label>
+                      <span className="text-xs font-extrabold text-red-600 bg-white px-2.5 py-0.5 rounded-lg border border-red-200">
+                        {simHighDays} Days
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={120}
+                      value={simHighDays}
+                      onChange={e => setSimHighDays(Number(e.target.value))}
+                      className="w-full accent-red-600 cursor-pointer"
+                    />
+                    <span className="text-[11px] text-red-700 mt-1 block">90%+ Peak occupancy, heavy continuous equipment runtime</span>
                   </div>
-                  <div className="text-right">
-                    <span className="text-xs font-bold text-red-600 bg-white px-2 py-1 rounded border border-red-200">
-                      {repairTarget.failure_probability || repairTarget.failureProbability || 75}% Risk
-                    </span>
-                    <small className="text-slate-500 block mt-1">Est. {repairTarget.estimated_cost || repairTarget.estimatedCost || '₹1.5L'}</small>
+
+                  {/* Neutral Days Slider */}
+                  <div className="bg-blue-50/70 p-4 rounded-2xl border border-blue-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold text-blue-900 flex items-center gap-1">
+                        ⚡ Neutral Demand Sessions (w = 0.35 - 0.40)
+                      </label>
+                      <span className="text-xs font-extrabold text-blue-600 bg-white px-2.5 py-0.5 rounded-lg border border-blue-200">
+                        {simNeutralDays} Days
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={120}
+                      value={simNeutralDays}
+                      onChange={e => setSimNeutralDays(Number(e.target.value))}
+                      className="w-full accent-blue-600 cursor-pointer"
+                    />
+                    <span className="text-[11px] text-blue-700 mt-1 block">65-75% standard occupancy, baseline OEM stress</span>
+                  </div>
+
+                  {/* Low Days Slider */}
+                  <div className="bg-emerald-50/70 p-4 rounded-2xl border border-emerald-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold text-emerald-900 flex items-center gap-1">
+                        🌿 Low Demand Sessions (w = 0.11 - 0.15)
+                      </label>
+                      <span className="text-xs font-extrabold text-emerald-600 bg-white px-2.5 py-0.5 rounded-lg border border-emerald-200">
+                        {simLowDays} Days
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={120}
+                      value={simLowDays}
+                      onChange={e => setSimLowDays(Number(e.target.value))}
+                      className="w-full accent-emerald-600 cursor-pointer"
+                    />
+                    <span className="text-[11px] text-emerald-700 mt-1 block">&le;35% off-peak occupancy, intermittent conservation cycles</span>
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Work Order Task Title</label>
-                  <input
-                    type="text"
-                    required
-                    value={repairForm.task}
-                    onChange={e => setRepairForm({ ...repairForm, task: e.target.value })}
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Priority Level</label>
-                    <select
-                      value={repairForm.priority}
-                      onChange={e => setRepairForm({ ...repairForm, priority: e.target.value })}
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs text-slate-600">
+                    Total Window Length: <b className="text-slate-900">{simHighDays + simNeutralDays + simLowDays} Operating Days</b>
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => { setSimHighDays(45); setSimNeutralDays(15); setSimLowDays(0); }}
+                      className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
                     >
-                      <option value="Critical">Critical (Immediate)</option>
-                      <option value="High">High (Within 24h)</option>
-                      <option value="Medium">Medium (Scheduled)</option>
-                      <option value="Low">Low (Routine)</option>
-                    </select>
+                      Reset to 45 / 15
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={evaluating}
+                      className="px-5 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-md transition-colors"
+                    >
+                      Recalculate Wear Curves
+                    </button>
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Assigned Vendor / Tech</label>
-                    <input
-                      type="text"
-                      required
-                      value={repairForm.technician}
-                      onChange={e => setRepairForm({ ...repairForm, technician: e.target.value })}
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Scheduled Date & Time</label>
-                    <input
-                      type="text"
-                      required
-                      value={repairForm.scheduledDate}
-                      onChange={e => setRepairForm({ ...repairForm, scheduledDate: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Est. Repair Cost</label>
-                    <input
-                      type="text"
-                      value={repairForm.estimatedCost}
-                      onChange={e => setRepairForm({ ...repairForm, estimatedCost: e.target.value })}
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Special Instructions & Safety Notes</label>
-                  <textarea
-                    rows={2}
-                    value={repairForm.notes}
-                    onChange={e => setRepairForm({ ...repairForm, notes: e.target.value })}
-                    placeholder="Enter lock-out tag-out instructions or replacement part numbers..."
-                  />
-                </div>
-
-                <div className="pt-2 flex items-center justify-end gap-3 border-t border-slate-100">
-                  <button type="button" className="secondary" onClick={() => setRepairTarget(null)}>
-                    Cancel
-                  </button>
-                  <button type="submit" className="primary" disabled={busy} style={{ background: '#be123c' }}>
-                    {busy ? 'Dispatching...' : 'Confirm & Dispatch Work Order'}
-                  </button>
                 </div>
               </form>
-            </motion.div>
-          </div>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
-      {/* RESCHEDULE WORK ORDER MODAL */}
-      <AnimatePresence>
-        {rescheduleTask && (
-          <div className="modal-overlay" onClick={() => setRescheduleTask(null)}>
-            <motion.div
-              className="modal-content"
-              onClick={e => e.stopPropagation()}
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              style={{ maxWidth: '460px' }}
-            >
-              <div className="guest-modal-header">
-                <div>
-                  <h2 style={{ fontSize: '17px' }}>Reschedule Maintenance Task</h2>
-                  <p className="muted">{rescheduleTask.task}</p>
-                </div>
-                <button className="icon-btn close-modal-btn" onClick={() => setRescheduleTask(null)}>
-                  <X size={18} />
-                </button>
-              </div>
+      {/* KPI Overview Strip */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between">
+          <div>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Monitored Facilities</span>
+            <div className="text-2xl font-bold text-slate-900 mt-1">{data?.stats?.totalMonitoredServices || 4} Core Services</div>
+            <span className="text-xs text-slate-500 mt-0.5 block">Grouped wear degradation models</span>
+          </div>
+          <div className="p-3 bg-indigo-50 rounded-2xl">
+            <Layers className="w-6 h-6 text-indigo-600" />
+          </div>
+        </div>
 
-              <form onSubmit={handleConfirmReschedule} className="p-6 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Current Date/Time</label>
-                  <p className="text-sm font-medium text-slate-700 bg-slate-100 p-2.5 rounded-lg">
-                    {rescheduleTask.scheduled_date || rescheduleTask.scheduled}
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between">
+          <div>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Due Immediately (100% Fatigue)</span>
+            <div className="text-2xl font-bold text-red-600 mt-1">{data?.stats?.dueImmediatelyCount || 0} Facilities</div>
+            <span className="text-xs text-red-500 font-medium mt-0.5 block">Threshold reached &bull; Service now</span>
+          </div>
+          <div className="p-3 bg-red-50 rounded-2xl">
+            <AlertTriangle className="w-6 h-6 text-red-600" />
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between">
+          <div>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Approaching Threshold</span>
+            <div className="text-2xl font-bold text-amber-600 mt-1">{data?.stats?.warningCount || 0} Facilities</div>
+            <span className="text-xs text-amber-600 font-medium mt-0.5 block">&ge;80% wear limit reached</span>
+          </div>
+          <div className="p-3 bg-amber-50 rounded-2xl">
+            <Clock className="w-6 h-6 text-amber-600" />
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between">
+          <div>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Operational / Safe</span>
+            <div className="text-2xl font-bold text-emerald-600 mt-1">{data?.stats?.operationalCount || 0} Facilities</div>
+            <span className="text-xs text-emerald-600 font-medium mt-0.5 block">Fatigue capacity available</span>
+          </div>
+          <div className="p-3 bg-emerald-50 rounded-2xl">
+            <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+          </div>
+        </div>
+      </div>
+
+      {/* The 4 Core Service Cards with Exact Mathematical Decomposition */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {currentServices.map((service) => {
+          const isCritical = service.urgencyBadge === 'critical';
+          const isWarning = service.urgencyBadge === 'warning';
+          const isMathOpen = expandedMathId === service.id;
+
+          return (
+            <motion.div
+              key={service.id}
+              layout
+              className={`bg-white rounded-3xl border transition-all duration-300 shadow-sm hover:shadow-md overflow-hidden flex flex-col justify-between ${
+                isCritical
+                  ? 'border-red-300 ring-2 ring-red-100'
+                  : isWarning
+                  ? 'border-amber-300 ring-2 ring-amber-100'
+                  : 'border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="p-6">
+                {/* Header */}
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 flex-shrink-0 shadow-sm">
+                      {getServiceIcon(service.icon)}
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900 text-base leading-snug">{service.name}</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">{service.category} &bull; {service.location}</p>
+                    </div>
+                  </div>
+
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-bold border flex-shrink-0 flex items-center gap-1.5 ${
+                      isCritical
+                        ? 'bg-red-50 text-red-700 border-red-200'
+                        : isWarning
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      isCritical ? 'bg-red-500 animate-pulse' : isWarning ? 'bg-amber-500' : 'bg-emerald-500'
+                    }`} />
+                    {service.urgencyStatus}
+                  </span>
+                </div>
+
+                {/* Cumulative Fatigue Bar & Dynamic Trigger Days */}
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 mb-4 space-y-2.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-slate-700 flex items-center gap-1">
+                      <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                      Accumulated Fatigue Capacity
+                    </span>
+                    <span className="font-extrabold text-slate-900">
+                      {service.currentWearUnits} / {service.wearThreshold} Units ({service.wearPercentage}%)
+                    </span>
+                  </div>
+
+                  <div className="w-full h-3 bg-slate-200/80 rounded-full overflow-hidden">
+                    <motion.div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        isCritical
+                          ? 'bg-gradient-to-r from-orange-500 to-red-600'
+                          : isWarning
+                          ? 'bg-gradient-to-r from-amber-400 to-amber-600'
+                          : 'bg-gradient-to-r from-teal-400 to-emerald-500'
+                      }`}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${service.wearPercentage}%` }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                    <span>
+                      Observed Operating Sessions: <b className="text-slate-800">{service.daysElapsed} Days</b>
+                    </span>
+                    <span>
+                      Dynamic Trigger At: <b className="text-indigo-700">{service.projectedCycleDays} Days</b>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Mathematical Formula Box */}
+                <div className="bg-indigo-50/60 border border-indigo-100 rounded-2xl p-4 mb-4">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-bold text-indigo-950 uppercase tracking-wider flex items-center gap-1">
+                      <Calculator className="w-3.5 h-3.5 text-indigo-600" />
+                      Mathematical Fatigue Formulation
+                    </span>
+                    <span className="text-[10px] font-bold text-indigo-600 bg-white px-2 py-0.5 rounded-md border border-indigo-200">
+                      Burn Rate: {service.dailyBurnRate} u/day
+                    </span>
+                  </div>
+
+                  <code className="text-xs font-mono font-semibold text-slate-800 block bg-white/80 p-2.5 rounded-xl border border-indigo-100 overflow-x-auto">
+                    {service.mathFormula}
+                  </code>
+
+                  <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">
+                    Under current session distribution, threshold (<b>{service.wearThreshold} units</b>) will be reached in <b>{service.projectedCycleDays} days</b>. Days remaining: <b className={isCritical ? 'text-red-600 font-bold' : 'text-slate-900'}>{service.daysRemaining} days</b>.
                   </p>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">New Scheduled Slot</label>
-                  <input
-                    type="text"
-                    required
-                    value={newScheduleDate}
-                    onChange={e => setNewScheduleDate(e.target.value)}
-                    placeholder="e.g. 29 Sept 2026, 11:00 AM"
-                  />
-                </div>
-
-                <div className="pt-2 flex items-center justify-end gap-3 border-t border-slate-100">
-                  <button type="button" className="secondary" onClick={() => setRescheduleTask(null)}>
-                    Cancel
-                  </button>
-                  <button type="submit" className="primary" disabled={busy}>
-                    {busy ? 'Updating...' : 'Save Reschedule'}
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* EQUIPMENT DETAILS MODAL */}
-      <AnimatePresence>
-        {detailsTarget && (
-          <div className="modal-overlay" onClick={() => setDetailsTarget(null)}>
-            <motion.div
-              className="modal-content"
-              onClick={e => e.stopPropagation()}
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              style={{ maxWidth: '520px' }}
-            >
-              <div className="guest-modal-header">
-                <div>
-                  <h2 style={{ fontSize: '18px' }}>{detailsTarget.name}</h2>
-                  <p className="muted">{detailsTarget.location} &bull; {detailsTarget.type}</p>
-                </div>
-                <button className="icon-btn close-modal-btn" onClick={() => setDetailsTarget(null)}>
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="p-6 space-y-4">
-                <div className="grid grid-cols-2 gap-3 bg-slate-50 p-4 rounded-xl">
-                  <div>
-                    <small className="text-slate-500 block">Health Rating</small>
-                    <b className={`text-xl ${getHealthColor(detailsTarget.health)}`}>{detailsTarget.health}%</b>
-                  </div>
-                  <div>
-                    <small className="text-slate-500 block">Operating Status</small>
-                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${getStatusStyle(detailsTarget.status)}`}>
-                      {detailsTarget.status}
+                {/* AI Physical Degradation Mechanism Accordion */}
+                <div className="border border-slate-100 rounded-2xl overflow-hidden bg-slate-50/50">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedMathId(isMathOpen ? null : service.id)}
+                    className="w-full px-4 py-2.5 text-left flex items-center justify-between text-xs font-bold text-slate-700 hover:bg-slate-100/70 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                      AI Physical Degradation Mechanism & Rationale
                     </span>
-                  </div>
-                  <div>
-                    <small className="text-slate-500 block">Last Maintenance</small>
-                    <b>{detailsTarget.last_maintenance || detailsTarget.lastMaintenance || '2026-08-15'}</b>
-                  </div>
-                  <div>
-                    <small className="text-slate-500 block">Next Overhaul Due</small>
-                    <b>{detailsTarget.next_due || detailsTarget.nextDue || '2026-10-15'}</b>
-                  </div>
-                </div>
-
-                {detailsTarget.issue && (
-                  <div className="bg-red-50 p-3.5 rounded-xl border border-red-100">
-                    <small className="text-red-700 font-bold block mb-1">Diagnostic Issue Flagged:</small>
-                    <p className="text-sm text-red-900">{detailsTarget.issue}</p>
-                    <small className="text-slate-500 block mt-2">Est. repair cost: {detailsTarget.estimated_cost || detailsTarget.estimatedCost || 'N/A'}</small>
-                  </div>
-                )}
-
-                <div className="flex justify-end gap-3 pt-3 border-t border-slate-100">
-                  <button className="secondary" onClick={() => setDetailsTarget(null)}>
-                    Close
+                    {isMathOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                   </button>
-                  {detailsTarget.status !== 'Healthy' && (
-                    <button
-                      className="primary"
-                      onClick={() => {
-                        const target = detailsTarget;
-                        setDetailsTarget(null);
-                        openScheduleModal(target);
-                      }}
-                    >
-                      Schedule Repair Now
-                    </button>
+
+                  {isMathOpen && (
+                    <div className="px-4 pb-3.5 pt-1 text-xs text-slate-600 leading-relaxed border-t border-slate-100">
+                      <p>{service.aiMechanism}</p>
+                      <div className="flex items-center gap-4 mt-2.5 text-[11px] text-slate-500 font-medium">
+                        <span>Team: <b className="text-slate-800">{service.technicianTeam}</b></span>
+                        <span>&bull;</span>
+                        <span>Est. Cost: <b className="text-slate-800">{service.estimatedCost}</b></span>
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
-      {/* ADD EQUIPMENT MODAL */}
+              {/* Card Footer Action */}
+              <div className="px-6 py-4 bg-slate-50/90 border-t border-slate-100 flex items-center justify-between gap-3">
+                <div className="text-xs text-slate-500">
+                  Last Serviced: <b className="text-slate-700">{service.lastMaintenance}</b>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setServiceToPerform(service)}
+                  disabled={performingServiceId === service.id}
+                  className={`text-xs font-bold px-4 py-2 rounded-xl flex items-center gap-1.5 transition-all shadow-sm ${
+                    isCritical
+                      ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-600/30'
+                      : isWarning
+                      ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-600/30'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-600/30'
+                  }`}
+                >
+                  {performingServiceId === service.id ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>Perform Service & Reset Wear</span>
+                </button>
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+
+      {/* Real-Time Activity and Evaluation Log */}
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-indigo-600" />
+              Real-Time Cumulative Model & Certification Log
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Live audit trail of evaluated session mixes, cumulative fatigue threshold alerts, and technician service signoffs.
+            </p>
+          </div>
+          <span className="text-xs font-semibold px-3 py-1 rounded-full bg-slate-100 text-slate-600">
+            {data?.actionLogs?.length || 0} Synced Events
+          </span>
+        </div>
+
+        <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto pr-1">
+          {data?.actionLogs?.map((log) => (
+            <div key={log.id} className="py-3 flex items-start justify-between gap-4 text-xs">
+              <div className="flex items-start gap-3">
+                <div className={`p-1.5 rounded-lg mt-0.5 ${
+                  log.action_type === 'Maintenance Certified'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : log.action_type === 'Scenario Evaluated'
+                    ? 'bg-indigo-100 text-indigo-700'
+                    : 'bg-amber-100 text-amber-700'
+                }`}>
+                  {log.action_type === 'Maintenance Certified' ? (
+                    <Check className="w-3.5 h-3.5" />
+                  ) : (
+                    <Activity className="w-3.5 h-3.5" />
+                  )}
+                </div>
+                <div>
+                  <div className="font-semibold text-slate-900 flex items-center gap-2">
+                    <span>{log.service_name}</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">
+                      {log.action_type}
+                    </span>
+                  </div>
+                  <p className="text-slate-600 mt-0.5 leading-relaxed">{log.notes}</p>
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Certified by: <b className="text-slate-600">{log.performed_by}</b>
+                  </span>
+                </div>
+              </div>
+              <span className="text-[11px] text-slate-400 whitespace-nowrap">
+                {new Date(log.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* PERFORM SERVICE MODAL */}
       <AnimatePresence>
-        {showAddModal && (
-          <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+        {serviceToPerform && (
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setServiceToPerform(null)}>
             <motion.div
-              className="modal-content"
-              onClick={e => e.stopPropagation()}
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              style={{ maxWidth: '500px' }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200"
             >
-              <div className="guest-modal-header">
-                <div>
-                  <h2 style={{ fontSize: '18px' }}>Add Resort Equipment</h2>
-                  <p className="muted">Register hardware into Gemini predictive maintenance pipeline</p>
+              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-emerald-100 text-emerald-700 rounded-xl">
+                    <CheckCircle2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-base">Certify Preventative Maintenance</h3>
+                    <p className="text-xs text-slate-500">Reset cumulative fatigue & certify physical inspection</p>
+                  </div>
                 </div>
-                <button className="icon-btn close-modal-btn" onClick={() => setShowAddModal(false)}>
-                  <X size={18} />
+                <button onClick={() => setServiceToPerform(null)} className="text-slate-400 hover:text-slate-600">
+                  <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <form onSubmit={handleAddEquipment} className="p-6 space-y-4">
+              <form onSubmit={handleConfirmPerform} className="mt-4 space-y-4">
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <div className="text-sm font-bold text-slate-900">{serviceToPerform.name}</div>
+                  <div className="text-xs text-slate-500 mt-0.5">{serviceToPerform.category} &bull; {serviceToPerform.location}</div>
+                  <div className="mt-2 text-xs text-slate-600 flex items-center gap-4">
+                    <span>Fatigue: <b className="text-red-600">{serviceToPerform.currentWearUnits} / {serviceToPerform.wearThreshold} units</b></span>
+                    <span>Est. Cost: <b>{serviceToPerform.estimatedCost}</b></span>
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Equipment Name</label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Lead Technician / Certified Team</label>
                   <input
                     type="text"
                     required
-                    placeholder="e.g. Chiller Unit #3"
-                    value={newEquipment.name}
-                    onChange={e => setNewEquipment({ ...newEquipment, name: e.target.value })}
+                    value={performedBy}
+                    onChange={e => setPerformedBy(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    placeholder="Enter technician or team name"
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Location</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. North Wing Basement"
-                      value={newEquipment.location}
-                      onChange={e => setNewEquipment({ ...newEquipment, location: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Equipment Type</label>
-                    <select
-                      value={newEquipment.type}
-                      onChange={e => setNewEquipment({ ...newEquipment, type: e.target.value })}
-                    >
-                      <option value="HVAC">HVAC</option>
-                      <option value="Pump">Pump / Hydraulic</option>
-                      <option value="Generator">Generator</option>
-                      <option value="Elevator">Elevator</option>
-                      <option value="Ventilation">Ventilation</option>
-                      <option value="Treatment">Water Treatment</option>
-                    </select>
-                  </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Service & Physical Overhaul Notes</label>
+                  <textarea
+                    rows={3}
+                    value={performNotes}
+                    onChange={e => setPerformNotes(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    placeholder="E.g. Cleaned coils, balanced refrigerant pressures, verified safety cutoffs..."
+                  />
                 </div>
 
-                <div className="pt-2 flex items-center justify-end gap-3 border-t border-slate-100">
-                  <button type="button" className="secondary" onClick={() => setShowAddModal(false)}>
+                <div className="bg-emerald-50 text-emerald-800 p-3 rounded-xl text-xs flex items-center gap-2 border border-emerald-200">
+                  <Info className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>Submitting certifies the service in SQLite and resets the Cumulative Fatigue Index to 0.0 units.</span>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setServiceToPerform(null)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  >
                     Cancel
                   </button>
-                  <button type="submit" className="primary" disabled={busy}>
-                    {busy ? 'Saving...' : 'Register Equipment'}
+                  <button
+                    type="submit"
+                    className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-md transition-colors"
+                  >
+                    Certify & Reset Fatigue
                   </button>
                 </div>
               </form>
@@ -1121,6 +795,6 @@ export default function PredictiveMaintenance() {
           </div>
         )}
       </AnimatePresence>
-    </motion.div>
+    </div>
   );
 }

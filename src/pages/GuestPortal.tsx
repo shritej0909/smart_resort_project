@@ -1,9 +1,9 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Bot, Check, Clock, Coffee, Send, Sparkles, Star, Utensils, Waves, Plus, Minus, ClipboardList, Sun } from 'lucide-react';
+import { ArrowRight, Bot, Check, Clock, Coffee, Send, Sparkles, Star, Utensils, Waves, Plus, Minus, ClipboardList, Sun, MapPin, Flame } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { HeroImage } from '../components/Brand';
-import { api, money, type User, type MenuItem, type ServiceRequest, type Feedback } from '../services/api';
+import { api, money, type User, type MenuItem, type ServiceRequest, type Feedback, type ResortServiceRecord, type ServicesOverview, type BookingRecord } from '../services/api';
 
 const fadeUp = {
   hidden: { opacity: 0, y: 20 },
@@ -78,12 +78,36 @@ export function RequestList({ requests, manager = false, onStatus }: { requests:
   );
 }
 
-type Chat = { role: 'assistant' | 'user'; text: string; sources?: { id: string; title: string }[] };
+type Chat = {
+  role: 'assistant' | 'user';
+  text: string;
+  sources?: { id: string; title: string }[];
+  highCapacityAlert?: boolean;
+  bookingCreated?: {
+    id: string;
+    service_id: string;
+    service_name: string;
+    slot_time: string;
+    price: number;
+    status: string;
+  };
+  recommendations?: { id: string; name: string; slots: string; price: string }[];
+  nugen?: {
+    used?: boolean;
+    model?: string;
+    intent?: string;
+    confidence?: number;
+    category?: string;
+  };
+};
+
 
 export default function GuestPortal({ user, page, navigate }: { user: User; page: string; navigate: (page: string) => void }) {
   const [requests, setRequests] = useState<ServiceRequest[]>([]);
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [services, setServices] = useState<ResortServiceRecord[]>([]);
+  const [stayBooking, setStayBooking] = useState<BookingRecord | null>(null);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [diningTab, setDiningTab] = useState('All');
   const [busy, setBusy] = useState(false);
@@ -96,19 +120,23 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<Chat[]>([{
     role: 'assistant',
-    text: `Welcome, ${user.name.split(' ')[0]}! I'm your resort concierge. Ask me about dining, wellness, activities or the essentials for your stay.`
+    text: `Welcome, ${user.name.split(' ')[0]}! I'm your resort concierge. Ask me about spa bookings, wellness, activities, dining or anything for your stay.`
   }]);
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const refresh = async () => {
-    const [r, f, m] = await Promise.all([
+    const [r, f, m, s, b] = await Promise.all([
       api<ServiceRequest[]>('/requests'),
       api<Feedback[]>('/feedback'),
       api<MenuItem[]>('/menu'),
+      api<ServicesOverview>('/services').catch(() => null),
+      api<{ booking: BookingRecord | null }>('/bookings/my-stay').catch(() => null),
     ]);
     setRequests(r);
     setFeedback(f);
     setMenu(m);
+    if (s?.services) setServices(s.services);
+    if (b?.booking) setStayBooking(b.booking);
   };
 
   useEffect(() => {
@@ -165,13 +193,49 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
     });
   };
 
-  const sendChat = async (text: string) => {
+  const sendChat = async (text: string, bookServiceId?: string, slotTime?: string) => {
     if (!text.trim() || busy) return;
     setMessage('');
     setChat(old => [...old, { role: 'user', text }]);
     await perform(async () => {
-      const result = await api<{ answer: string; sources: Chat['sources'] }>('/concierge/chat', 'POST', { message: text });
-      setChat(old => [...old, { role: 'assistant', text: result.answer, sources: result.sources }]);
+      const result = await api<{
+        answer: string;
+        sources: Chat['sources'];
+        highCapacityAlert?: boolean;
+        bookingCreated?: Chat['bookingCreated'];
+        recommendations?: Chat['recommendations'];
+        nugen?: Chat['nugen'];
+      }>('/concierge/chat', 'POST', {
+        message: text,
+        bookService: bookServiceId,
+        slotTime: slotTime
+      });
+      setChat(old => [...old, {
+        role: 'assistant',
+        text: result.answer,
+        sources: result.sources,
+        highCapacityAlert: result.highCapacityAlert,
+        bookingCreated: result.bookingCreated,
+        recommendations: result.recommendations,
+        nugen: result.nugen
+      }]);
+
+      if (result.bookingCreated) {
+        setSuccess(`Booking confirmed! ${result.bookingCreated.service_name} sent directly to Manager end.`);
+        await refresh();
+      }
+    });
+  };
+
+  const bookResortService = async (serviceId: string, slotTime?: string) => {
+    await perform(async () => {
+      const res = await api<{ ok: boolean; message: string; service: ResortServiceRecord }>('/services/book', 'POST', {
+        service_id: serviceId,
+        slot_time: slotTime,
+        notes: `Booked directly via Guest Portal for Room ${user.room}`
+      });
+      setSuccess(`${res.message} Dispatched directly to Resort Manager queue.`);
+      await refresh();
     });
   };
 
@@ -224,7 +288,7 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
         <div>
           <span className="outline-pill">YOUR LITTLE CORNER OF PARADISE</span>
           <h2>Unwind. We'll take<br />care of the details.</h2>
-          <p>Room {user.room} - Ocean Suite - Demo stay</p>
+          <p>Room {user.room} - {stayBooking?.room_type || 'Deluxe Ocean View'} · {stayBooking ? `${stayBooking.check_in} to ${stayBooking.check_out} (${stayBooking.nights} nights)` : 'The Palms Luxury Stay'}</p>
           <motion.button
             className="light-button"
             onClick={() => navigate('concierge')}
@@ -239,7 +303,6 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
 
       <div className="section-title">
         <h2>How can we make your day?</h2>
-        <span>Consider it taken care of</span>
       </div>
 
       <div className="quick-grid">
@@ -299,17 +362,17 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
   // ── Concierge page ──────────────────────────────────────────
   if (page === 'concierge') return (
     <>
-      <PageHeading eyebrow="YOUR PERSONAL RESORT GUIDE" title="A little help, anytime." subtitle="Discover what's here, plan your day, and find the right service." />
+      <PageHeading eyebrow="YOUR PERSONAL RESORT GUIDE" title="AI Concierge & Live Experience Assistant" subtitle="Real-time assistance, proactive ML service recommendations, and instant booking sent directly to the Resort Manager." />
 
       <div className="concierge-layout">
         <motion.section className="panel chat-panel" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}>
           <div className="chat-header">
             <span className="feature-icon sage"><Bot size={24} /></span>
             <div>
-              <h2>AI concierge</h2>
-              <p><span className="status-dot" /> Resort guide connected</p>
+              <h2>AI Concierge</h2>
+              <p><span className="status-dot" /> Live Services Capacity & ML Rebalancing Connected</p>
             </div>
-            <span className="pill">RAG-powered</span>
+            <span className="pill">RAG + ML Engine</span>
           </div>
 
           <div className="chat-messages" aria-live="polite">
@@ -321,16 +384,81 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.3 }}
               >
-                <small>{entry.role === 'assistant' ? 'YOUR CONCIERGE' : 'YOU'}</small>
-                <p>{entry.text}</p>
+                <small style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                  <span>{entry.role === 'assistant' ? 'AI CONCIERGE' : 'YOU'}</span>
+                  {entry.nugen?.used && (
+                    <span style={{ color: '#059669', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                      <Sparkles size={11} color="#059669" /> AI Intelligence: Nugen Hospitality Model{entry.nugen.confidence ? ` (${Math.round(entry.nugen.confidence)}%)` : ''}
+                    </span>
+                  )}
+                </small>
+                <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+
+                  {entry.text}
+                </div>
+
+                {/* AI Concierge Proactive Recommendation Chips */}
+                {entry.recommendations && entry.recommendations.length > 0 && (
+                  <div style={{ marginTop: '12px', background: '#faf5ff', padding: '12px', borderRadius: '12px', border: '1px solid #e9d5ff' }}>
+                    <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#7e22ce', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+                      <Sparkles size={14} color="#a855f7" /> AI Suggested Next Available Resort Services:
+                    </span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {entry.recommendations.map(rec => (
+                        <div
+                          key={rec.id}
+                          style={{
+                            background: '#fff',
+                            border: '1px solid #d8b4fe',
+                            borderRadius: '8px',
+                            padding: '8px 12px',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
+                          }}
+                        >
+                          <div>
+                            <b style={{ display: 'block', fontSize: '0.84rem', color: '#1e293b' }}>{rec.name}</b>
+                            <small style={{ color: '#7c3aed' }}>{rec.slots} • {rec.price}</small>
+                          </div>
+                          <motion.button
+                            type="button"
+                            className="secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem', borderColor: '#a855f7', color: '#7e22ce' }}
+                            onClick={() => sendChat(`Please reserve ${rec.name} for Room ${user.room}`, rec.id)}
+                            whileHover={{ scale: 1.04 }}
+                            whileTap={{ scale: 0.96 }}
+                          >
+                            Book &rarr;
+                          </motion.button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Dispatched to Manager Confirmation Badge */}
+                {entry.bookingCreated && (
+                  <div style={{ marginTop: '10px', padding: '10px 14px', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <Check size={18} color="#059669" />
+                    <div style={{ flex: 1, fontSize: '0.82rem', color: '#065f46' }}>
+                      <b>Dispatched to Manager Queue (#REQ-{entry.bookingCreated.id.slice(0, 6).toUpperCase()})</b>
+                      <p style={{ margin: 0 }}>Room {user.room} • {entry.bookingCreated.service_name} • {entry.bookingCreated.slot_time}</p>
+                    </div>
+                    <button type="button" className="text-button" onClick={() => navigate('requests')} style={{ fontSize: '0.78rem', color: '#059669', fontWeight: 700 }}>
+                      View requests &rarr;
+                    </button>
+                  </div>
+                )}
+
                 {!!entry.sources?.length && (
-                  <div className="sources">
+                  <div className="sources" style={{ marginTop: '8px' }}>
                     {entry.sources.map(source => <span key={source.id}>Source: {source.title}</span>)}
                   </div>
                 )}
               </motion.div>
             ))}
-            {busy && <p className="muted">Checking the resort guide...</p>}
+            {busy && <p className="muted" style={{ padding: '8px' }}>Checking real-time services capacity...</p>}
             <div ref={chatEnd} />
           </div>
 
@@ -339,7 +467,7 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
           <form className="chat-compose" onSubmit={e => { e.preventDefault(); void sendChat(message); }}>
             <input
               aria-label="Message your concierge"
-              placeholder="What would make your stay better?"
+              placeholder="Ask about spa availability, dining, or request a booking..."
               maxLength={2000}
               value={message}
               onChange={e => setMessage(e.target.value)}
@@ -354,20 +482,28 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
               <Send size={18} />
             </motion.button>
           </form>
-          <p className="chat-disclaimer">Answers come from the sample resort guide. Bookings require staff confirmation.</p>
+          <p className="chat-disclaimer">Real-time availability synced with resort manager queue. Bookings instantly notify the front desk.</p>
         </motion.section>
 
         <aside className="concierge-side">
-          <span className="eyebrow">A GOOD PLACE TO START</span>
+          <span className="eyebrow">POPULAR QUERIES & BOOKINGS</span>
           <h2>Leave the details<br />to us.</h2>
-          {['What time is breakfast?', 'Tell me about the spa and pool', 'What activities can I try?', 'Can I request late checkout?'].map((text, i) => (
+          {[
+            'What are the current room rates and pricing?',
+            'Is the Serenity Spa available today?',
+            'Book Serenity Spa at 06:00 PM',
+            "Tell me about Couple's Retreat",
+            'What dinner options are available tonight?',
+            'Sunset yoga and meditation deck',
+            'Can I request late checkout?'
+          ].map((text, i) => (
             <motion.button
               key={text}
               disabled={busy}
               onClick={() => void sendChat(text)}
               initial={{ opacity: 0, x: 15 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.2 + i * 0.1 }}
+              transition={{ delay: 0.15 + i * 0.08 }}
               whileHover={{ x: 4 }}
             >
               {text}
@@ -376,9 +512,9 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
           ))}
           <div className="help-card">
             <Sparkles size={22} />
-            <h3>Prefer a personal touch?</h3>
-            <p>Send a request directly to our team. We're here to help.</p>
-            <button className="text-button" onClick={() => navigate('services')}>Make a request <ArrowRight size={16} /></button>
+            <h3>Direct Service Catalog</h3>
+            <p>Browse live working slots for all resort services and spa treatments.</p>
+            <button className="text-button" onClick={() => navigate('services')}>View Resort Services &rarr;</button>
           </div>
         </aside>
       </div>
@@ -535,32 +671,103 @@ export default function GuestPortal({ user, page, navigate }: { user: User; page
   // ── Services page ───────────────────────────────────────────
   if (page === 'services') return (
     <>
-      <PageHeading eyebrow="THE LITTLE THINGS MATTER" title="Consider it taken care of." subtitle="Tell us what you need. Our team will take it from here." />
+      <PageHeading eyebrow="THE LITTLE THINGS MATTER" title="Resort Services & Amenities" subtitle="Book spa treatments, wellness sessions, and activities in real time — or submit custom requests directly to resort management." />
       {alerts}
+
+      {/* Real-time Services Catalog */}
+      <motion.section className="panel" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} style={{ marginBottom: '24px' }}>
+        <div className="section-title">
+          <div>
+            <h2>Featured Resort Services & Working Slots</h2>
+            <p className="muted" style={{ margin: 0, fontSize: '0.88rem' }}>
+              Live availability synced directly with the Resort Management Workspace
+            </p>
+          </div>
+          <span className="pill" style={{ color: '#059669', borderColor: '#a7f3d0' }}>
+            ● Real-Time Sync
+          </span>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px', marginTop: '12px' }}>
+          {services.map(svc => {
+            const isPeak = svc.occupancyRate >= 95;
+            const isFull = svc.available_slots === 0;
+
+            return (
+              <motion.article
+                key={svc.id}
+                style={{
+                  background: '#fff',
+                  border: isPeak ? '2px solid #f43f5e' : '1px solid #e2e8f0',
+                  borderRadius: '16px',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column'
+                }}
+                whileHover={{ y: -4, boxShadow: '0 10px 24px rgba(0,0,0,0.08)' }}
+              >
+                <div style={{ position: 'relative', height: '140px' }}>
+                  <img src={svc.image} alt={svc.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+                  <span style={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(255,255,255,0.9)', padding: '3px 8px', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 700 }}>
+                    {svc.category}
+                  </span>
+                  <span style={{ position: 'absolute', top: '10px', right: '10px', background: isPeak ? '#e11d48' : '#059669', color: '#fff', padding: '3px 8px', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 700 }}>
+                    {svc.status}
+                  </span>
+                </div>
+
+                <div style={{ padding: '14px', display: 'flex', flexDirection: 'column', flex: 1, gap: '8px' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700 }}>{svc.name}</h3>
+                  <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>{svc.tagline}</p>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#475569', marginTop: '4px' }}>
+                    <span><b>{svc.price === 0 ? 'Complimentary' : money(svc.price)}</b> / {svc.unit}</span>
+                    <span style={{ color: isPeak ? '#e11d48' : '#059669', fontWeight: 600 }}>
+                      {svc.available_slots} slots left
+                    </span>
+                  </div>
+
+                  <motion.button
+                    className="primary"
+                    disabled={isFull || busy}
+                    style={{ marginTop: 'auto', paddingTop: '8px', paddingBottom: '8px', fontSize: '0.82rem' }}
+                    onClick={() => bookResortService(svc.id, svc.timing)}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    {isFull ? 'Sold Out' : 'Book Slot (Direct to Manager)'} &rarr;
+                  </motion.button>
+                </div>
+              </motion.article>
+            );
+          })}
+        </div>
+      </motion.section>
+
       <div className="two-columns">
         <motion.form className="panel service-form" onSubmit={service} initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}>
-          <h2>Make a request</h2>
+          <h2>Custom Resort Request</h2>
           <label htmlFor="service-category">How can we help?</label>
           <select id="service-category" value={category} onChange={e => setCategory(e.target.value)}>
             {['Housekeeping', 'Maintenance', 'Spa', 'Special request'].map(value => <option key={value}>{value}</option>)}
           </select>
           <label htmlFor="request-detail">A few details</label>
-          <textarea id="request-detail" required maxLength={2000} rows={6} placeholder={category === 'Housekeeping' ? 'For example, two fresh towels and an extra pillow...' : 'Tell us what you need and your preferred time...'} value={detail} onChange={e => setDetail(e.target.value)} />
+          <textarea id="request-detail" required maxLength={2000} rows={5} placeholder={category === 'Housekeeping' ? 'For example, two fresh towels and an extra pillow...' : 'Tell us what you need and your preferred time...'} value={detail} onChange={e => setDetail(e.target.value)} />
           <p className="muted">For {user.name} - Room {user.room}</p>
           <motion.button className="primary" disabled={busy || !detail.trim()} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
-            {busy ? 'Sending...' : 'Send request'}<ArrowRight size={17} />
+            {busy ? 'Sending...' : 'Send custom request'}<ArrowRight size={17} />
           </motion.button>
         </motion.form>
 
         <motion.div className="service-aside" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2 }}>
           <span className="feature-icon sage"><Sparkles size={25} /></span>
           <h2>A more comfortable stay,<br />one detail at a time.</h2>
-          <p>From fresh linens to a special celebration, we're happy to help.</p>
+          <p>From fresh linens to a spa sanctuary booking, we're happy to take care of every detail.</p>
           <div className="daily-item">
             <Clock size={21} />
             <div>
-              <b>Stay in the loop</b>
-              <p>Track updates in My requests. Timing and availability will be confirmed by the team.</p>
+              <b>Direct Manager Queue Sync</b>
+              <p>Every booking and request is dispatched in real time to the Resort Manager Workspace.</p>
             </div>
           </div>
           <button className="text-button" onClick={() => navigate('requests')}>View my requests <ArrowRight size={16} /></button>
